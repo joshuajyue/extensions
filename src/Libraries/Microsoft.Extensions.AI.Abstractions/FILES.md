@@ -51,6 +51,8 @@ This document describes the purpose of every file in the `Microsoft.Extensions.A
 | `ChatResponseFormatJson.cs` | JSON response format, optionally constrained by a JSON schema. |
 | `ChatToolMode.cs` | Abstract base controlling how tools may be selected by the model. |
 | `AutoChatToolMode.cs` | Tool mode: model decides whether and which tool to call. |
+| `AutoSelectingChatClient.cs` | Internal step-1 auto-select router that chooses among candidate chat clients and forwards requests with normalized selection metadata. |
+| `AutoSelectingChatClientCandidate.cs` | Internal candidate descriptor used by the step-1 auto-select router (name, provider, model, and underlying client). |
 | `NoneChatToolMode.cs` | Tool mode: tool calling disabled. |
 | `RequiredChatToolMode.cs` | Tool mode: model must call a tool (optionally a named one). |
 | `ReasoningOptions.cs` | Options for models that support explicit reasoning (effort level, etc.). |
