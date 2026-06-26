@@ -180,30 +180,100 @@ var selector = new ComplexityChatRouteSelector(
 builder.UseSelector(selector);
 ```
 
-The tiers are `Simple`, `Medium`, `Complex`, and `Reasoning`. Classification sums seven
-weighted signals (defaults mirror LiteLLM), then compares the score against tier boundaries:
+### How LiteLLM's complexity router works (and how this port mirrors it)
 
-| Dimension | Detects | Default weight |
-|---|---|---|
-| Token count | short (`< 15`) vs. long (`> 400`) prompts | `0.10` |
-| Code presence | `function`, `class`, `api`, `database`, … | `0.30` |
-| Reasoning markers | `step by step`, `think through`, `analyze`, … | `0.25` |
-| Technical terms | `architecture`, `distributed`, `encryption`, … | `0.25` |
-| Simple indicators | `what is`, `define`, `hello`, … (**lowers** the score) | `0.05` |
-| Multi-step patterns | `first … then`, numbered steps | `0.03` |
-| Question complexity | multiple `?` | `0.02` |
+The router never asks a model how hard a prompt is — it estimates complexity with cheap,
+deterministic heuristics so the decision costs nothing and never adds latency. The pipeline is:
 
-**Special rule:** two or more distinct reasoning markers force the `Reasoning` tier outright,
-regardless of the weighted score. Every weight, boundary, token threshold, and keyword list is
-overridable via `ComplexityRouterOptions`, so the scoring can be tuned (or fully replaced with
-your own vocabulary) without changing the selector:
+1. **Pick the text.** From the message list it takes the **last user message** and the **last
+   system message** (earlier turns are ignored — the router classifies the *current* ask). All
+   matching is case-insensitive.
+2. **Score seven dimensions.** Each dimension produces a raw score; that score is multiplied by the
+   dimension's weight and the products are summed into one number. There is **no clamping** — the
+   sum can go negative (simple prompts) or above 1 (very complex ones).
+3. **Apply the reasoning override.** If the user message hits **2+ distinct reasoning markers**, the
+   request is forced to the `Reasoning` tier regardless of the weighted sum. This is LiteLLM's "the
+   user explicitly asked me to think" shortcut.
+4. **Map the score to a tier** using three boundaries.
 
-**Matching details (faithful to LiteLLM):** single-word keywords match on **word boundaries**
-(so `api` does not fire inside `capital`) while multi-word phrases match as substrings; each
-keyword dimension contributes a **bucketed** score based on how many distinct keywords hit (not a
-linear count); multi-step patterns are **regexes**; the code, technical, and simple signals also
-read the system prompt, whereas reasoning markers, token count, and question count consider only
-the user message.
+#### The seven dimensions
+
+Each row below lists what the dimension reads, how its **raw score** is computed, and its default
+weight. "Distinct matches" means the number of *different* keywords that hit, not total occurrences.
+
+| Dimension | Text it reads | Raw score | Weight |
+|---|---|---|---|
+| **Token count** | user message | `len/4` chars→tokens: `< 15` → **−1.0**, `> 400` → **+1.0**, else `0`. Short prompts are *penalized* toward Simple. | `0.10` |
+| **Code presence** | system + user | bucketed by distinct hits: `0` → `0`, `1` → `0.5`, `≥ 2` → `1.0`. (`function`, `class`, `api`, `database`, …) | `0.30` |
+| **Reasoning markers** | user only | bucketed: `0` → `0`, `1` → `0.7`, `≥ 2` → `1.0`. (`step by step`, `think through`, `analyze this`, …) | `0.25` |
+| **Technical terms** | system + user | bucketed: `< 2` → `0`, `2–3` → `0.5`, `≥ 4` → `1.0`. (`architecture`, `distributed`, `encryption`, …) | `0.25` |
+| **Simple indicators** | system + user | bucketed: `0` → `0`, `≥ 1` → **−1.0**. *Lowers* the score. (`what is`, `define`, `hello`, …) | `0.05` |
+| **Multi-step patterns** | system + user | any regex matches → `0.5`, else `0`. (`first.*?then`, `step\s*\d`, `\d+\.\s`, `[a-z]\)\s`) | `0.03` |
+| **Question complexity** | user message | more than `3` `?` characters → `0.5`, else `0`. | `0.02` |
+
+So the weighted sum is:
+
+```text
+score =  tokenScore        * 0.10
+      +  codeBucket        * 0.30
+      +  reasoningBucket   * 0.25
+      +  technicalBucket   * 0.25
+      +  simpleBucket      * 0.05   // simpleBucket is 0 or -1, so this subtracts
+      +  multiStepHit      * 0.03
+      +  questionHit       * 0.02
+```
+
+Two design choices worth calling out, both faithful to LiteLLM's source:
+
+- **Buckets, not linear counts.** A dimension does not score `count / cap`. It jumps between two or
+  three fixed values at integer thresholds, so one strong code keyword already contributes `0.5` and
+  two saturate it at `1.0`. This makes the score robust to keyword-stuffing.
+- **Code presence dominates.** With weight `0.30`, two code keywords alone contribute `0.30`, which
+  is already enough to leave `Simple`. Code-shaped prompts route up aggressively by design.
+
+#### Tier boundaries
+
+After the override check, the sum is bucketed into a `ChatComplexityTier`:
+
+| Score range | Tier |
+|---|---|
+| `< 0.15` | `Simple` |
+| `< 0.35` | `Medium` |
+| `< 0.60` | `Complex` |
+| `≥ 0.60` | `Reasoning` |
+
+#### Matching semantics
+
+- **Single-word keywords match on word boundaries**, so `api` fires on `the api` but not inside
+  `capital` or `therapist`. Multi-word phrases (e.g. `pull request`, `machine learning`) match as
+  plain substrings.
+- **Multi-step patterns are regexes** (case-insensitive, with a 100 ms match timeout to guard
+  against pathological input), letting `1. … 2. …` numbering and `first … then` phrasing both fire.
+- **Text scope differs per dimension on purpose:** the system prompt contributes to code/technical/
+  simple/multi-step signals (deployment context counts), but **reasoning markers, token count, and
+  question count look only at the user message** — so a system prompt can never single-handedly
+  force the `Reasoning` tier.
+
+#### Worked example
+
+> *"Write a function for a distributed database api using encryption architecture."* (one user
+> message, no system prompt)
+
+- Token count: ~77 chars → ~19 tokens (`len/4`), between 15 and 400 → `0`.
+- Code presence: `function`, `database`, `api` = 3 distinct → bucket `1.0` × `0.30` = **`0.30`**.
+- Technical terms: `distributed`, `encryption`, `architecture` = 3 distinct → bucket `0.5` × `0.25`
+  = **`0.125`**.
+- Reasoning / simple / multi-step / question: no hits → `0`.
+
+Sum = `0.425`, which is `≥ 0.35` and `< 0.60` → **`Complex`**. No reasoning markers, so the override
+does not fire.
+
+#### Customizing
+
+Every weight, boundary, token threshold, keyword list, and regex is a property on
+`ComplexityRouterOptions`, so you can retune the math or swap in your own vocabulary without
+touching the selector. Because the keyword lists are just data, replacing `TechnicalTerms` with your
+own domain words turns this into a domain-aware router for free:
 
 ```csharp
 var options = new ComplexityRouterOptions
