@@ -12,16 +12,21 @@ using Microsoft.Shared.DiagnosticIds;
 namespace Microsoft.Extensions.AI;
 
 /// <summary>
-/// A deterministic, metadata-driven selection policy. Ranks the available models using their
-/// declared <see cref="RoutingChatModelTraits"/>, context window, cost, and latency, inferring
-/// required traits and the prompt size from the request.
+/// A deterministic selection policy that applies hard eligibility gates and then ranks the surviving
+/// models by cost and latency. A model is eligible when it declares every <see cref="RoutingChatModelTraits"/>
+/// capability the request requires (for example tool calling when tools are supplied) and its context
+/// window can fit the approximately estimated prompt; eligible models are then ordered by lower cost,
+/// then lower latency.
 /// </summary>
 /// <remarks>
-/// This is a starting-point heuristic intended for experimentation. The produced plan is the full
-/// set of models in ranked order, so the best-ranked model is the primary route and the rest act as
-/// fallbacks. Models whose <see cref="RoutingChatModel.MaxInputTokens"/> cannot fit the (approximately
-/// estimated) prompt are ranked last so they are only used as a last resort. Ties preserve the
-/// original registration order.
+/// This is a starting-point heuristic intended for experimentation. Traits are used purely as a
+/// <i>capability gate</i> — a correctness filter — and never as a quality or performance signal: a
+/// model is not preferred for advertising more capabilities than the request needs, because modern
+/// chat models largely share the same capability flags and so cannot be ranked on quality by them.
+/// The produced plan is the full set of models in ranked order, so the best-ranked model is the
+/// primary route and the rest act as fallbacks. Ineligible models — those missing a required
+/// capability or whose <see cref="RoutingChatModel.MaxInputTokens"/> cannot fit the prompt — are
+/// ranked last so they are only used as a last resort. Ties preserve the original registration order.
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public sealed class RuleBasedChatRouteSelector : IChatRouteSelector
@@ -53,20 +58,18 @@ public sealed class RuleBasedChatRouteSelector : IChatRouteSelector
         RoutingChatModelTraits requiredTraits,
         int estimatedPromptTokens)
     {
-        // A model whose context window cannot fit the prompt is guaranteed to fail, so fit is the
-        // strongest signal: fitting models always rank above non-fitting ones.
-        int fitComparison = CompareContextFit(left, right, estimatedPromptTokens);
-        if (fitComparison != 0)
+        // Hard gates first. A model that lacks a capability the request requires, or whose context
+        // window cannot fit the prompt, is guaranteed to fail, so eligible models always rank above
+        // ineligible ones. Capability (traits) is strictly a correctness gate here, never a quality
+        // signal: a model is not rewarded for advertising more traits than the request needs.
+        bool leftEligible = IsEligible(left, requiredTraits, estimatedPromptTokens);
+        bool rightEligible = IsEligible(right, requiredTraits, estimatedPromptTokens);
+        if (leftEligible != rightEligible)
         {
-            return fitComparison;
+            return leftEligible ? 1 : -1;
         }
 
-        int traitComparison = CompareRequiredTraits(left.Traits, right.Traits, requiredTraits);
-        if (traitComparison != 0)
-        {
-            return traitComparison;
-        }
-
+        // Among equally (in)eligible models, prefer lower cost, then lower latency.
         int costComparison = CompareLowerIsBetter(GetTotalTokenCost(left), GetTotalTokenCost(right));
         if (costComparison != 0)
         {
@@ -76,33 +79,19 @@ public sealed class RuleBasedChatRouteSelector : IChatRouteSelector
         return CompareLowerIsBetter(left.TypicalLatency, right.TypicalLatency);
     }
 
-    private static int CompareContextFit(RoutingChatModel left, RoutingChatModel right, int estimatedPromptTokens)
-    {
-        bool leftFits = Fits(left, estimatedPromptTokens);
-        bool rightFits = Fits(right, estimatedPromptTokens);
+    // A model passes the hard gates when it declares every required capability and its context window
+    // can fit the prompt. This is an all-or-nothing correctness check, not a ranking.
+    private static bool IsEligible(RoutingChatModel model, RoutingChatModelTraits requiredTraits, int estimatedPromptTokens) =>
+        HasRequiredTraits(model.Traits, requiredTraits) && Fits(model, estimatedPromptTokens);
 
-        return leftFits == rightFits ? 0 : leftFits ? 1 : -1;
-    }
+    // The capability gate: a model satisfies it only when it declares every trait the request
+    // requires. Extra traits beyond those required do not make a model rank higher.
+    private static bool HasRequiredTraits(RoutingChatModelTraits modelTraits, RoutingChatModelTraits requiredTraits) =>
+        (modelTraits & requiredTraits) == requiredTraits;
 
     // A model fits when its context window is unknown (cannot prove it will not fit) or large enough.
     private static bool Fits(RoutingChatModel model, int estimatedPromptTokens) =>
         model.MaxInputTokens is not int maxInputTokens || estimatedPromptTokens <= maxInputTokens;
-
-    private static int CompareRequiredTraits(
-        RoutingChatModelTraits leftTraits,
-        RoutingChatModelTraits rightTraits,
-        RoutingChatModelTraits requiredTraits)
-    {
-        if (requiredTraits == RoutingChatModelTraits.None)
-        {
-            return 0;
-        }
-
-        bool leftHasTraits = (leftTraits & requiredTraits) == requiredTraits;
-        bool rightHasTraits = (rightTraits & requiredTraits) == requiredTraits;
-
-        return leftHasTraits == rightHasTraits ? 0 : leftHasTraits ? 1 : -1;
-    }
 
     private static decimal? GetTotalTokenCost(RoutingChatModel model) =>
         model.InputTokenCostPerMillion + model.OutputTokenCostPerMillion;

@@ -2103,11 +2103,66 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.SemanticChatRouteSelector.SemanticChatRouteSelector(Microsoft.Extensions.AI.IEmbeddingGenerator<string, Microsoft.Extensions.AI.Embedding<float>> embeddingGenerator, System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<string>> modelProfiles, float minimumSimilarity = 0);",
+          "Member": "Microsoft.Extensions.AI.SemanticChatRouteSelector.SemanticChatRouteSelector(Microsoft.Extensions.AI.IEmbeddingGenerator<string, Microsoft.Extensions.AI.Embedding<float>> embeddingGenerator, System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<string>> modelProfiles, string? defaultModel = null, Microsoft.Extensions.AI.SemanticRouterOptions? options = null);",
           "Stage": "Experimental"
         },
         {
           "Member": "System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan> Microsoft.Extensions.AI.SemanticChatRouteSelector.SelectRouteAsync(Microsoft.Extensions.AI.ChatRouteContext context, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "enum Microsoft.Extensions.AI.SemanticRouteAggregation",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.SemanticRouteAggregation.SemanticRouteAggregation();",
+          "Stage": "Experimental"
+        }
+      ],
+      "Fields": [
+        {
+          "Member": "const Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouteAggregation.Max",
+          "Stage": "Experimental",
+          "Value": "2"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouteAggregation.Mean",
+          "Stage": "Experimental",
+          "Value": "1"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouteAggregation.Sum",
+          "Stage": "Experimental",
+          "Value": "0"
+        }
+      ]
+    },
+    {
+      "Type": "sealed class Microsoft.Extensions.AI.SemanticRouterOptions",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.SemanticRouterOptions.SemanticRouterOptions();",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouterOptions.Aggregation { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "float Microsoft.Extensions.AI.SemanticRouterOptions.ScoreThreshold { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyDictionary<string, float>? Microsoft.Extensions.AI.SemanticRouterOptions.ScoreThresholdByModel { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "int Microsoft.Extensions.AI.SemanticRouterOptions.TopK { get; set; }",
           "Stage": "Experimental"
         }
       ]

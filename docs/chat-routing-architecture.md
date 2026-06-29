@@ -43,7 +43,7 @@ The folder divides cleanly into three groups:
 |---|---|
 | **Mechanism** | `RoutingChatClient`, `RoutingChatClientBuilder`, `RoutingStickiness`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
 | **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan`, `ChatRouteAttempt` |
-| **Shipped policies & adapters** | `RuleBasedChatRouteSelector`, `SemanticChatRouteSelector`, `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `ChatModelCatalog` (+ `ChatModelCatalogOptions`) |
+| **Shipped policies & adapters** | `RuleBasedChatRouteSelector`, `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `ChatModelCatalog` (+ `ChatModelCatalogOptions`) |
 
 ---
 
@@ -254,7 +254,9 @@ A `[Flags]` enum of **objective** capabilities that can be read straight from a 
 The deliberate omission matters: **subjective dimensions** (a "quality" score, a "coding" judgement,
 "low cost") are **not** modeled here, because they aren't facts you can read from a catalog — they're
 opinions that drift. Put those in `RoutingChatModel.AdditionalProperties` instead. This keeps the
-enum small, factual, and stable as the AI landscape shifts.
+enum small, factual, and stable as the AI landscape shifts. Traits are intended to be used as a
+**capability gate** — "can this model do what the request needs *at all*?" — and not as a proxy for
+quality: most modern chat models share the same flags, so traits cannot rank models on quality.
 
 ### `RoutingStickiness.cs` — the caching *scope*
 
@@ -270,40 +272,54 @@ selector's own validity rule says the situation changed."
 
 ## The shipped policies
 
-### `RuleBasedChatRouteSelector.cs` — deterministic, metadata-driven ranking
+### `RuleBasedChatRouteSelector.cs` — deterministic, gate-then-cost ranking
 
 A stateless (singleton `Instance`) policy that **ranks all models** and returns them as a plan
-(best-ranked primary, the rest fallbacks). The comparison (`CompareModels`) is a strict priority
-cascade:
+(best-ranked primary, the rest fallbacks). The comparison (`CompareModels`) applies hard
+**eligibility gates** first and then ranks the survivors by cost and latency:
 
-1. **Context fit (hard filter).** A model whose `MaxInputTokens` cannot hold the (roughly estimated,
-   ~4 chars/token) prompt is ranked *below* every fitting model — a too-small window is guaranteed to
-   fail, so it's the strongest signal. Unknown context window = assumed to fit (can't prove it won't).
-2. **Required traits.** Traits are *inferred from the request*: `options.Tools` ⇒ `ToolCalling`,
-   `options.Reasoning` ⇒ `Reasoning`. Models that satisfy all required traits rank above those that
-   don't. (Only these two objective inferences are made — nothing subjective.)
-3. **Cost** (lower total input+output `...CostPerMillion` is better).
-4. **Latency** (lower `TypicalLatency` is better).
+1. **Eligibility (hard gate).** A model is eligible only when it (a) declares every **required
+   capability** and (b) can **fit the prompt** in its context window. Both are guaranteed-to-fail
+   conditions, so eligible models always rank above ineligible ones (ineligible models stay in the
+   plan but only as last-resort fallbacks).
+   - **Required traits** are *inferred from the request*: `options.Tools` ⇒ `ToolCalling`,
+     `options.Reasoning` ⇒ `Reasoning`. Traits are a **capability gate (a correctness filter), never
+     a quality/performance signal** — a model is *not* preferred for advertising more traits than the
+     request needs, because modern chat models largely share the same capability flags. (Only these
+     two objective inferences are made — nothing subjective.)
+   - **Context fit** uses a rough estimate (~4 chars/token); an unknown context window is assumed to
+     fit (can't prove it won't).
+2. **Cost** (lower total input+output `...CostPerMillion` is better).
+3. **Latency** (lower `TypicalLatency` is better).
 
 Ties preserve registration order (the sort is stable, and unknown values sort consistently via the
 `CompareLowerIsBetter` helpers). This is the "sensible default ranking" policy — useful out of the
 box, easy to reason about, no I/O.
 
-### `SemanticChatRouteSelector.cs` — embedding-based routing
+### `SemanticChatRouteSelector.cs` (+ `SemanticRouterOptions.cs`, `SemanticRouteAggregation.cs`) — embedding-based routing
 
-Routes by **meaning**. Each model is described by a few representative "utterances" (a profile). At
-request time it embeds the last user message and routes to the model whose profile utterances are
-most cosine-similar.
+A **faithful port of LiteLLM's "auto router" (its semantic router)**, which delegates its routing math
+to the `semantic-router` library. Each model is described by a few representative "utterances" (a
+profile). At request time it embeds the last user message and routes to the model whose profile
+utterances are most cosine-similar, using the same algorithm LiteLLM does.
 
 - Profiles are embedded **once**, lazily, and cached (`EnsureProfilesAsync` + a double-checked lock on
-  `_profilesTask`). A faulted/canceled embedding task is **not** cached, so the next call retries.
-- Similarity uses `TensorPrimitives.CosineSimilarity`. Each model scores the **max** similarity across
-  its utterances; models are ranked by score (ties keep registration order) and returned as a plan.
-- A `minimumSimilarity` floor guards against forcing a bad match: if the best score is below it (or
-  the request has no user text), the **first registered model** becomes the primary route.
-- Wrap the injected `IEmbeddingGenerator` with caching to amortize the per-request query embedding.
+  `_profilesTask`) into a flat index (each utterance vector tagged with its model). A faulted/canceled
+  embedding task is **not** cached, so the next call retries.
+- Per request: embed the last **user** message (no fallback to other roles, matching LiteLLM's
+  `_extract_text_from_messages`); score every utterance with `TensorPrimitives.CosineSimilarity`; keep
+  the globally highest **`TopK`** matches (default `5`); group those by model; combine each model's
+  matched scores with **`Aggregation`** (`Mean` by default, or `Sum`/`Max`).
+- **Threshold gate.** In descending aggregated-score order, route to the first model whose score meets
+  its threshold — a per-model override (`ScoreThresholdByModel`, mirroring `semantic-router`'s per-route
+  `score_threshold`) if present, else the global **`ScoreThreshold`** (default `0.3`, LiteLLM's default
+  encoder threshold). If none pass — or the request has no user text — the optional **`defaultModel`**
+  (else the first registered model) becomes the primary route.
+- The plan ranks all models: primary first, then the rest by descending aggregated score. Wrap the
+  injected `IEmbeddingGenerator` with caching to amortize the per-request query embedding.
 
 This is the heavier, "understands intent" policy — appropriate when keyword rules are too brittle.
+Tune it with `SemanticRouterOptions` (`TopK`, `Aggregation`, `ScoreThreshold`, `ScoreThresholdByModel`).
 
 ### `ComplexityChatRouteSelector.cs` (+ `ComplexityRouterOptions.cs`, `ChatComplexityTier.cs`)
 
@@ -395,8 +411,12 @@ each mechanism guarantee:
 - **Plumbing:** `GetService` returns both the client and the selector; `Dispose` disposes each client
   exactly once (verified with a `CountingDisposeClient`).
 - **Shipped selectors (integration):** `RuleBasedChatRouteSelector` prefers lower cost with no signal,
-  and prefers a tool-calling model when tools are requested; `SemanticChatRouteSelector` routes to the
-  most similar model and falls back to the first model below the minimum-similarity floor.
+  prefers a tool-calling model when tools are requested, treats extra traits as *not* a quality signal
+  (a richer-but-pricier model never outranks a cheaper one absent a required capability), and ranks a
+  model that lacks a required capability last even when it is cheaper; `SemanticChatRouteSelector`
+  routes to the most similar model, aggregates a model's matches by mean (or sum/max), applies the
+  global top-k, honors per-model thresholds, and falls back to the default model when nothing passes
+  the threshold or the request has no user text.
 
 ### `ComplexityChatRouteSelectorTests.cs` — the complexity port
 

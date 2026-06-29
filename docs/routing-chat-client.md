@@ -136,15 +136,18 @@ predicate (see Stickiness).
 
 Built-in, experimental policies:
 
-- **`RuleBasedChatRouteSelector`** — a deterministic, metadata-driven heuristic. It infers the
-  required capability traits from the request (tool use → `ToolCalling`; reasoning options →
-  `Reasoning`) and ranks models by **context fit** (models whose `MaxInputTokens` can't hold the
-  estimated prompt are dropped), then required traits, then cost, with latency as the tie-breaker.
-  Ties preserve registration order.
+- **`RuleBasedChatRouteSelector`** — a deterministic heuristic that applies hard **capability gates**
+  and then ranks by cost. It infers the required capability traits from the request (tool use →
+  `ToolCalling`; reasoning options → `Reasoning`) and treats both **capability** and **context fit** as
+  eligibility gates: a model that lacks a required trait or whose `MaxInputTokens` can't hold the
+  estimated prompt is ranked last (used only as a last-resort fallback). Eligible models are then ranked
+  by **cost**, with latency as the tie-breaker. Traits are a correctness gate, **not** a quality signal —
+  advertising more capabilities than the request needs never raises a model's rank. Ties preserve
+  registration order.
 - **`ComplexityChatRouteSelector`** — a deterministic port of LiteLLM's complexity router; see
   [Complexity-based routing](#complexity-based-routing-litellm-style) below.
-- **`SemanticChatRouteSelector`** — embedding-based; see
-  [semantic-chat-client-selection.md](semantic-chat-client-selection.md).
+- **`SemanticChatRouteSelector`** — a faithful port of LiteLLM's semantic (auto) router; embedding-based,
+  see [semantic-chat-client-selection.md](semantic-chat-client-selection.md).
 
 Inline delegates are supported via the builder:
 

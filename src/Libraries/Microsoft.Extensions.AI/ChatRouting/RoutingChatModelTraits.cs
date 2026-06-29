@@ -7,13 +7,17 @@ using Microsoft.Shared.DiagnosticIds;
 
 namespace Microsoft.Extensions.AI;
 
-/// <summary>Describes objective capability flags that a selection policy may use when routing between chat models.</summary>
+/// <summary>Describes objective capability flags that a selection policy may use as a hard capability gate when routing between chat models.</summary>
 /// <remarks>
 /// Each trait corresponds to a capability that can be read straight from a provider catalog such as
 /// LiteLLM's <c>model_prices_and_context_window.json</c> (a <c>supports_*</c> flag). Traits are
 /// advisory metadata: the routing mechanism itself never interprets them; only a selection policy
-/// (an <see cref="IChatRouteSelector"/>) decides whether and how to use them. Subjective dimensions
-/// (such as a quality score or a "coding" judgement) are deliberately not modeled here — put those in
+/// (an <see cref="IChatRouteSelector"/>) decides whether and how to use them. They are intended to be
+/// used as a <i>capability gate</i> — a correctness filter that answers "can this model do what the
+/// request needs at all?" (for example tool calling or vision) — and not as a proxy for quality or
+/// performance: modern chat models largely share the same capability flags, so traits cannot
+/// discriminate between models on quality. Subjective dimensions (such as a quality score or a
+/// "coding" judgement) are deliberately not modeled here — put those in
 /// <see cref="RoutingChatModel.AdditionalProperties"/> instead.
 /// </remarks>
 [Flags]

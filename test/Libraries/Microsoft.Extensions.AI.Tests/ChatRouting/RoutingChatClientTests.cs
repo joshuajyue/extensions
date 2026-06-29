@@ -388,6 +388,50 @@ public class RoutingChatClientTests
     }
 
     [Fact]
+    public async Task RuleBasedSelector_ExtraTraitsAreNotAQualitySignal()
+    {
+        // With no capability required by the request, a model advertising extra traits must not
+        // outrank a cheaper model: traits are a capability gate, not a quality/performance signal.
+        var models = new[]
+        {
+            new RoutingChatModel(
+                "rich",
+                inputTokenCostPerMillion: 10m,
+                outputTokenCostPerMillion: 10m,
+                traits: RoutingChatModelTraits.ToolCalling | RoutingChatModelTraits.Vision | RoutingChatModelTraits.Reasoning),
+            new RoutingChatModel("cheap", inputTokenCostPerMillion: 1m, outputTokenCostPerMillion: 1m),
+        };
+
+        var context = new ChatRouteContext([new(ChatRole.User, "hello there")], options: null, models);
+        ChatRoutePlan plan = await RuleBasedChatRouteSelector.Instance.SelectRouteAsync(context);
+
+        Assert.Equal("cheap", plan.OrderedModels[0].Name);
+    }
+
+    [Fact]
+    public async Task RuleBasedSelector_RanksModelMissingRequiredTraitLastEvenWhenCheaper()
+    {
+        // The capability gate is hard: a cheaper model that cannot satisfy a required capability is
+        // ranked behind a pricier model that can, so it is only ever a last-resort fallback.
+        var models = new[]
+        {
+            new RoutingChatModel("cheap-no-tools", inputTokenCostPerMillion: 1m, outputTokenCostPerMillion: 1m),
+            new RoutingChatModel(
+                "pricey-tools",
+                inputTokenCostPerMillion: 10m,
+                outputTokenCostPerMillion: 10m,
+                traits: RoutingChatModelTraits.ToolCalling),
+        };
+
+        var options = new ChatOptions { Tools = [AIFunctionFactory.Create(() => "ok", "get_status")] };
+        var context = new ChatRouteContext([new(ChatRole.User, "what is the status")], options, models);
+        ChatRoutePlan plan = await RuleBasedChatRouteSelector.Instance.SelectRouteAsync(context);
+
+        Assert.Equal("pricey-tools", plan.OrderedModels[0].Name);
+        Assert.Equal("cheap-no-tools", plan.OrderedModels[^1].Name);
+    }
+
+    [Fact]
     public async Task SemanticSelector_RoutesToMostSimilarModel()
     {
         var models = new[]
@@ -427,13 +471,170 @@ public class RoutingChatClientTests
         };
 
         using var embedder = KeywordEmbeddingGenerator();
-        var selector = new SemanticChatRouteSelector(embedder, profiles, minimumSimilarity: 0.99f);
+        var selector = new SemanticChatRouteSelector(
+            embedder, profiles, options: new SemanticRouterOptions { ScoreThreshold = 0.99f });
         var context = new ChatRouteContext([new(ChatRole.User, "is it going to rain today")], options: null, models);
 
         ChatRoutePlan plan = await selector.SelectRouteAsync(context);
 
         // "rain" is only weakly similar to the weather profile (below 0.99), so the first registered model wins.
         Assert.Equal("code", plan.OrderedModels[0].Name);
+    }
+
+    [Fact]
+    public async Task SemanticSelector_AggregatesWithMeanByDefault()
+    {
+        // "alpha" has one near-perfect utterance and one poor one (mean 0.50); "beta" has two
+        // consistently strong utterances (mean 0.70). Mean aggregation (the default) prefers "beta".
+        var models = new[] { new RoutingChatModel("alpha"), new RoutingChatModel("beta") };
+        var profiles = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["alpha"] = ["a-high", "a-low"],
+            ["beta"] = ["b-mid1", "b-mid2"],
+        };
+
+        using var embedder = VectorEmbeddingGenerator(MeanVsMaxVectors());
+        var selector = new SemanticChatRouteSelector(embedder, profiles);
+        var context = new ChatRouteContext([new(ChatRole.User, "route me")], options: null, models);
+
+        ChatRoutePlan plan = await selector.SelectRouteAsync(context);
+
+        Assert.Equal("beta", plan.OrderedModels[0].Name);
+    }
+
+    [Fact]
+    public async Task SemanticSelector_AggregatesWithMaxWhenConfigured()
+    {
+        // Same profiles as the mean test, but Max aggregation prefers "alpha" for its single best (0.95).
+        var models = new[] { new RoutingChatModel("alpha"), new RoutingChatModel("beta") };
+        var profiles = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["alpha"] = ["a-high", "a-low"],
+            ["beta"] = ["b-mid1", "b-mid2"],
+        };
+
+        using var embedder = VectorEmbeddingGenerator(MeanVsMaxVectors());
+        var selector = new SemanticChatRouteSelector(
+            embedder, profiles, options: new SemanticRouterOptions { Aggregation = SemanticRouteAggregation.Max });
+        var context = new ChatRouteContext([new(ChatRole.User, "route me")], options: null, models);
+
+        ChatRoutePlan plan = await selector.SelectRouteAsync(context);
+
+        Assert.Equal("alpha", plan.OrderedModels[0].Name);
+    }
+
+    [Fact]
+    public async Task SemanticSelector_AggregatesWithSumWhenConfigured()
+    {
+        // "alpha" has two moderate utterances (sum 0.80); "beta" has one strong one (sum 0.70). Sum
+        // aggregation prefers "alpha" even though its mean (0.40) is lower than beta's (0.70).
+        var models = new[] { new RoutingChatModel("alpha"), new RoutingChatModel("beta") };
+        var profiles = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["alpha"] = ["s-a1", "s-a2"],
+            ["beta"] = ["s-b1"],
+        };
+
+        var vectors = new Dictionary<string, float[]>
+        {
+            ["route me"] = [1f, 0f],
+            ["s-a1"] = [0.4f, 0.91651514f],
+            ["s-a2"] = [0.4f, 0.91651514f],
+            ["s-b1"] = [0.7f, 0.71414284f],
+        };
+
+        using var embedder = VectorEmbeddingGenerator(vectors);
+        var selector = new SemanticChatRouteSelector(
+            embedder, profiles, options: new SemanticRouterOptions { Aggregation = SemanticRouteAggregation.Sum });
+        var context = new ChatRouteContext([new(ChatRole.User, "route me")], options: null, models);
+
+        ChatRoutePlan plan = await selector.SelectRouteAsync(context);
+
+        Assert.Equal("alpha", plan.OrderedModels[0].Name);
+    }
+
+    [Fact]
+    public async Task SemanticSelector_AppliesGlobalTopK()
+    {
+        // With full mean, "alpha" (0.6) beats "beta" (mean of 0.9 and 0.1 = 0.5). But TopK=1 keeps only
+        // the single best match globally (beta's 0.9), so "beta" wins — proving top-k is global.
+        var models = new[] { new RoutingChatModel("alpha"), new RoutingChatModel("beta") };
+        var profiles = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["alpha"] = ["a1"],
+            ["beta"] = ["b1", "b2"],
+        };
+
+        var vectors = new Dictionary<string, float[]>
+        {
+            ["route me"] = [1f, 0f],
+            ["a1"] = [0.6f, 0.8f],
+            ["b1"] = [0.9f, 0.43588989f],
+            ["b2"] = [0.1f, 0.99498744f],
+        };
+
+        using var embedder = VectorEmbeddingGenerator(vectors);
+        var selector = new SemanticChatRouteSelector(
+            embedder, profiles, options: new SemanticRouterOptions { TopK = 1 });
+        var context = new ChatRouteContext([new(ChatRole.User, "route me")], options: null, models);
+
+        ChatRoutePlan plan = await selector.SelectRouteAsync(context);
+
+        Assert.Equal("beta", plan.OrderedModels[0].Name);
+    }
+
+    [Fact]
+    public async Task SemanticSelector_HonorsPerModelThreshold()
+    {
+        // "beta" scores highest (0.9) but its per-model threshold (0.95) rejects it, so the next model
+        // past its threshold, "alpha" (0.6 >= global 0.3), is selected instead.
+        var models = new[] { new RoutingChatModel("alpha"), new RoutingChatModel("beta") };
+        var profiles = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["alpha"] = ["a1"],
+            ["beta"] = ["b1"],
+        };
+
+        var vectors = new Dictionary<string, float[]>
+        {
+            ["route me"] = [1f, 0f],
+            ["a1"] = [0.6f, 0.8f],
+            ["b1"] = [0.9f, 0.43588989f],
+        };
+
+        using var embedder = VectorEmbeddingGenerator(vectors);
+        var selector = new SemanticChatRouteSelector(
+            embedder,
+            profiles,
+            options: new SemanticRouterOptions
+            {
+                ScoreThresholdByModel = new Dictionary<string, float> { ["beta"] = 0.95f },
+            });
+        var context = new ChatRouteContext([new(ChatRole.User, "route me")], options: null, models);
+
+        ChatRoutePlan plan = await selector.SelectRouteAsync(context);
+
+        Assert.Equal("alpha", plan.OrderedModels[0].Name);
+    }
+
+    [Fact]
+    public async Task SemanticSelector_RoutesToDefaultModelWithoutUserText()
+    {
+        var models = new[] { new RoutingChatModel("alpha"), new RoutingChatModel("beta") };
+        var profiles = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["alpha"] = ["a1"],
+            ["beta"] = ["b1"],
+        };
+
+        using var embedder = KeywordEmbeddingGenerator();
+        var selector = new SemanticChatRouteSelector(embedder, profiles, defaultModel: "beta");
+        var context = new ChatRouteContext([new(ChatRole.System, "you are a helpful assistant")], options: null, models);
+
+        ChatRoutePlan plan = await selector.SelectRouteAsync(context);
+
+        // No user message means no routing signal, so the configured default model is the primary route.
+        Assert.Equal("beta", plan.OrderedModels[0].Name);
     }
 
     private static TestEmbeddingGenerator KeywordEmbeddingGenerator() => new()
@@ -448,6 +649,33 @@ public class RoutingChatClientTests
 
             return Task.FromResult(result);
         }
+    };
+
+    // An embedder that returns an explicit, pre-computed vector for each exact input string, so tests
+    // can assert on precise cosine similarities.
+    private static TestEmbeddingGenerator VectorEmbeddingGenerator(IReadOnlyDictionary<string, float[]> vectors) => new()
+    {
+        GenerateAsyncCallback = (values, _, _) =>
+        {
+            var result = new GeneratedEmbeddings<Embedding<float>>();
+            foreach (string value in values)
+            {
+                result.Add(new Embedding<float>(vectors[value]));
+            }
+
+            return Task.FromResult(result);
+        }
+    };
+
+    // Unit vectors whose cosine similarity with the query [1, 0] is the value encoded in the name:
+    // a-high=0.95, a-low=0.05 (alpha mean 0.50, max 0.95); b-mid=0.70 (beta mean 0.70, max 0.70).
+    private static Dictionary<string, float[]> MeanVsMaxVectors() => new()
+    {
+        ["route me"] = [1f, 0f],
+        ["a-high"] = [0.95f, 0.31224990f],
+        ["a-low"] = [0.05f, 0.99874922f],
+        ["b-mid1"] = [0.70f, 0.71414284f],
+        ["b-mid2"] = [0.70f, 0.71414284f],
     };
 
     private static float[] KeywordVector(string text)
