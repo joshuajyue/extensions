@@ -43,7 +43,7 @@ The folder divides cleanly into three groups:
 |---|---|
 | **Mechanism** | `RoutingChatClient`, `RoutingChatClientBuilder`, `RoutingStickiness`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
 | **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan`, `ChatRouteAttempt` |
-| **Shipped policies & adapters** | `RuleBasedChatRouteSelector`, `SemanticChatRouteSelector`, `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `LiteLlmModelCatalog` (+ `LiteLlmCatalogOptions`) |
+| **Shipped policies & adapters** | `RuleBasedChatRouteSelector`, `SemanticChatRouteSelector`, `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `ChatModelCatalog` (+ `ChatModelCatalogOptions`) |
 
 ---
 
@@ -341,26 +341,34 @@ worked example are in [`routing-chat-client.md`](./routing-chat-client.md#how-li
 
 `ClassifyTier(messages)` is public so callers can get the tier without routing (no-user ⇒ `Medium`).
 
-### `LiteLlmModelCatalog.cs` (+ `LiteLlmCatalogOptions.cs`) — the catalog adapter
+### `ChatModelCatalog.cs` (+ `ChatModelCatalogOptions.cs`) — the catalog adapter
 
-A **policy-side helper** that maps LiteLLM's `model_prices_and_context_window.json` document into
-metadata-only `RoutingChatModel` entries. It is *not* part of the mechanism; it just produces advisory
-metadata a selector can consume.
+A **policy-side helper** that maps external catalog documents into metadata-only `RoutingChatModel`
+entries. It is *not* part of the mechanism; it just produces advisory metadata a selector can consume.
+Two sources are supported via paired parse/load methods:
 
-- `Parse(json)` / `Load(stream)` read the document and produce models, de-duplicated by name
-  (case-insensitive, first wins), skipping the `sample_spec` pseudo-entry.
-- **Only objective fields are mapped.** `supports_*` flags become `RoutingChatModelTraits`; per-token
-  cost is converted to per-million; `max_input_tokens` becomes `MaxInputTokens`; the provider, source,
-  and a curated set of additional objective fields (max output tokens, mode, deprecation date, and
-  extra capability flags) are carried under `AdditionalProperties` keyed with the `litellm.` prefix.
-- **Latency and quality are never inferred** — the catalog carries no such data, so those stay the
-  selector's responsibility.
+- `ParseLiteLlm(json)` / `LoadLiteLlm(stream)` — LiteLLM's `model_prices_and_context_window.json`
+  (a name-keyed object); skips the `sample_spec` pseudo-entry and entries whose `mode != "chat"`.
+- `ParseGitHubModels(json)` / `LoadGitHubModels(stream)` — the GitHub Models catalog at
+  `https://models.github.ai/catalog/models` (a JSON array); skips embedding-only entries.
 
-**`LiteLlmCatalogOptions.cs`** controls the mapping: `ChatModelsOnly` (default `true`, keep only
-`mode == "chat"`), `UpdatedAt` (provenance stamp recorded on each model so a policy can reason about
-staleness), `SourceUri` (fallback source), and `IncludeModel` (a name predicate to include/exclude
-entries). Produced models carry **no client** — bind one with `WithClient` or via a
-`RoutingChatModelCatalog`.
+Both produce models de-duplicated by name (case-insensitive, first wins). **Only objective fields are
+mapped.** Capability flags become `RoutingChatModelTraits` (LiteLLM `supports_*`; GitHub Models
+`capabilities` plus `supported_input_modalities` for `Vision`); `max_input_tokens` becomes
+`MaxInputTokens`. LiteLLM additionally carries per-token cost (converted to per-million) — the GitHub
+Models catalog has **no pricing**, which is exactly why the two are complementary: GitHub Models supplies
+capabilities and context limits, LiteLLM adds cost. Source-specific extras are carried under
+`AdditionalProperties` keyed with the `litellm.` or `github.` prefix. The GitHub Models parser resolves
+each entry's publisher-prefixed `id` (e.g. `openai/gpt-5-mini`) to a bare `Name` (`gpt-5-mini`, the merge
+key shared with LiteLLM) while keeping the full id as `ModelId` (what the inference endpoint expects).
+**Latency and quality are never inferred** — the catalogs carry no such data, so those stay the
+selector's responsibility.
+
+**`ChatModelCatalogOptions.cs`** controls both mappings: `ChatModelsOnly` (default `true`; LiteLLM keeps
+`mode == "chat"`, GitHub Models keeps entries whose output modalities include `"text"`), `UpdatedAt`
+(provenance stamp recorded on each model so a policy can reason about staleness), `SourceUri` (fallback
+source), and `IncludeModel` (a bare-name predicate to include/exclude entries). Produced models carry
+**no client** — bind one with `WithClient` or via a `RoutingChatModelCatalog`.
 
 ---
 
@@ -398,14 +406,20 @@ rates a code+technical prompt as `Complex`; `SelectRouteAsync` routes to the tie
 back to the default model for an unmapped tier, and preserves registration order when the target model
 isn't present; and custom keyword lists change the classification (proving the options are honored).
 
-### `LiteLlmModelCatalogTests.cs` — the catalog adapter
+### `ChatModelCatalogTests.cs` — the catalog adapter
 
-Validates the mapping rules: rejects null JSON; skips `sample_spec` and non-chat entries by default;
-maps the capability `supports_*` flags to traits; **never infers latency or quality**; converts
-per-token cost to per-million; carries the curated objective metadata under the `litellm.` prefix;
-leaves `MaxInputTokens` null when absent; includes embeddings when `ChatModelsOnly == false`; applies
-the `IncludeModel` filter and the `UpdatedAt` provenance; de-duplicates by name case-insensitively;
-`Load(stream)` matches `Parse(string)`; and a parsed entry binds cleanly into a catalog and a client.
+Validates both mappings. For the LiteLLM parser: rejects null JSON; skips `sample_spec` and non-chat
+entries by default; maps the capability `supports_*` flags to traits; **never infers latency or
+quality**; converts per-token cost to per-million; carries the curated objective metadata under the
+`litellm.` prefix; leaves `MaxInputTokens` null when absent; includes embeddings when
+`ChatModelsOnly == false`; applies the `IncludeModel` filter and the `UpdatedAt` provenance;
+de-duplicates by name case-insensitively; `LoadLiteLlm(stream)` matches `ParseLiteLlm(string)`; and a
+parsed entry binds cleanly into a catalog and a client. For the GitHub Models parser: skips
+embedding-only entries by default; strips the publisher prefix for `Name` while keeping the full
+publisher-prefixed `ModelId`; maps `capabilities` and `supported_input_modalities` to traits; **never
+infers cost or latency**; carries `github.`-prefixed metadata; applies `ChatModelsOnly`, `IncludeModel`,
+and stream parity; and rejects a non-array root. A final cross-catalog test proves a shared model
+(`gpt-5-mini`) resolves to the same merge `Name` across both sources.
 
 ---
 

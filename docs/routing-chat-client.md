@@ -298,18 +298,19 @@ token cost, context window (`MaxInputTokens`), `SourceUri`, and `UpdatedAt` — 
 `RoutingChatModelCatalog` can store as client-less entries and bind to a client later via
 `WithClient`.
 
-To avoid hand-authoring that metadata, the experimental **`LiteLlmModelCatalog`** adapter maps
-the LiteLLM catalog (`model_prices_and_context_window.json`, ~2900 entries) into
-`RoutingChatModel` entries:
+To avoid hand-authoring that metadata, the experimental **`ChatModelCatalog`** adapter maps external
+catalogs into `RoutingChatModel` entries. It supports two sources: the LiteLLM catalog
+(`model_prices_and_context_window.json`, ~2900 entries) via `ParseLiteLlm`/`LoadLiteLlm`, and the
+GitHub Models catalog (`https://models.github.ai/catalog/models`) via `ParseGitHubModels`/`LoadGitHubModels`:
 
 ```csharp
 using var http = new HttpClient();
 await using Stream json = await http.GetStreamAsync(
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json");
 
-IReadOnlyList<RoutingChatModel> models = LiteLlmModelCatalog.Load(
+IReadOnlyList<RoutingChatModel> models = ChatModelCatalog.LoadLiteLlm(
     json,
-    new LiteLlmCatalogOptions
+    new ChatModelCatalogOptions
     {
         ChatModelsOnly = true,                  // skip embedding/image/audio entries
         UpdatedAt = DateTimeOffset.UtcNow,      // provenance for currency-aware selectors
@@ -320,14 +321,20 @@ var catalog = new RoutingChatModelCatalog(models);
 RoutingChatModel gpt4o = catalog.CreateModel("gpt-4o", myOpenAiClient);
 ```
 
-It maps **only objective fields**: `supports_function_calling`/`supports_tool_choice` →
+It maps **only objective fields**. From LiteLLM: `supports_function_calling`/`supports_tool_choice` →
 `ToolCalling`, `supports_vision`/`supports_image_input` → `Vision`, `supports_reasoning` →
 `Reasoning`; per-token cost → `InputTokenCostPerMillion`/`OutputTokenCostPerMillion`;
 `max_input_tokens` → the first-class `MaxInputTokens` (context window); and mode, deprecation
 date, and other capability flags into `AdditionalProperties` keyed with
-`LiteLlmModelCatalog.MetadataKeyPrefix` (`"litellm."`). It deliberately **never** infers latency
-or quality (`TypicalLatency`, or any subjective score) because the catalog has no such data —
-those remain the selector's judgment. This makes it a natural **hard-filter** input
+`ChatModelCatalog.LiteLlmMetadataKeyPrefix` (`"litellm."`). From GitHub Models: the `capabilities`
+array → `ToolCalling`/`Reasoning`, `supported_input_modalities` containing `"image"` → `Vision`, and
+`limits.max_input_tokens` → `MaxInputTokens`; extras land under the `"github."` prefix. The GitHub
+Models catalog carries **no pricing**, so the two sources are complementary — GitHub Models supplies
+capabilities and context limits, LiteLLM adds cost. Both resolve a model such as `gpt-5-mini` to the
+same bare `Name` (the GitHub Models publisher prefix is stripped into `Name`, with the full
+`openai/gpt-5-mini` kept as `ModelId`), so the two can be merged by name. The adapter deliberately
+**never** infers latency or quality (`TypicalLatency`, or any subjective score) because the catalogs
+have no such data — those remain the selector's judgment. This makes it a natural **hard-filter** input
 (eliminate models that can't satisfy a request, or whose context window is too small), leaving the
 soft ranking to policy.
 

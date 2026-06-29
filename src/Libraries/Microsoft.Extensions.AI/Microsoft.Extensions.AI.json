@@ -204,6 +204,83 @@
       ]
     },
     {
+      "Type": "static class Microsoft.Extensions.AI.ChatModelCatalog",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "static System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.ChatModelCatalog.LoadGitHubModels(System.IO.Stream utf8Json, Microsoft.Extensions.AI.ChatModelCatalogOptions? options = null);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "static System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.ChatModelCatalog.LoadLiteLlm(System.IO.Stream utf8Json, Microsoft.Extensions.AI.ChatModelCatalogOptions? options = null);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "static System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.ChatModelCatalog.ParseGitHubModels(string json, Microsoft.Extensions.AI.ChatModelCatalogOptions? options = null);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "static System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.ChatModelCatalog.ParseLiteLlm(string json, Microsoft.Extensions.AI.ChatModelCatalogOptions? options = null);",
+          "Stage": "Experimental"
+        }
+      ],
+      "Fields": [
+        {
+          "Member": "const string Microsoft.Extensions.AI.ChatModelCatalog.GitHubModelsMaxOutputTokensMetadataKey",
+          "Stage": "Experimental",
+          "Value": "github.max_output_tokens"
+        },
+        {
+          "Member": "const string Microsoft.Extensions.AI.ChatModelCatalog.GitHubModelsMetadataKeyPrefix",
+          "Stage": "Experimental",
+          "Value": "github."
+        },
+        {
+          "Member": "const string Microsoft.Extensions.AI.ChatModelCatalog.LiteLlmDeprecationDateMetadataKey",
+          "Stage": "Experimental",
+          "Value": "litellm.deprecation_date"
+        },
+        {
+          "Member": "const string Microsoft.Extensions.AI.ChatModelCatalog.LiteLlmMaxOutputTokensMetadataKey",
+          "Stage": "Experimental",
+          "Value": "litellm.max_output_tokens"
+        },
+        {
+          "Member": "const string Microsoft.Extensions.AI.ChatModelCatalog.LiteLlmMetadataKeyPrefix",
+          "Stage": "Experimental",
+          "Value": "litellm."
+        }
+      ]
+    },
+    {
+      "Type": "sealed class Microsoft.Extensions.AI.ChatModelCatalogOptions",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.ChatModelCatalogOptions.ChatModelCatalogOptions();",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "bool Microsoft.Extensions.AI.ChatModelCatalogOptions.ChatModelsOnly { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Predicate<string>? Microsoft.Extensions.AI.ChatModelCatalogOptions.IncludeModel { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Uri? Microsoft.Extensions.AI.ChatModelCatalogOptions.SourceUri { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.DateTimeOffset? Microsoft.Extensions.AI.ChatModelCatalogOptions.UpdatedAt { get; set; }",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
       "Type": "class Microsoft.Extensions.AI.ChatResponse<T> : Microsoft.Extensions.AI.ChatResponse",
       "Stage": "Stable",
       "Methods": [
@@ -1098,65 +1175,6 @@
         {
           "Member": "static Microsoft.Extensions.AI.ImageGeneratorBuilder Microsoft.Extensions.DependencyInjection.ImageGeneratorBuilderServiceCollectionExtensions.AddKeyedImageGenerator(this Microsoft.Extensions.DependencyInjection.IServiceCollection serviceCollection, object? serviceKey, System.Func<System.IServiceProvider, Microsoft.Extensions.AI.IImageGenerator> innerGeneratorFactory, Microsoft.Extensions.DependencyInjection.ServiceLifetime lifetime = Microsoft.Extensions.DependencyInjection.ServiceLifetime.Singleton);",
           "Stage": "Experimental"
-        }
-      ]
-    },
-    {
-      "Type": "sealed class Microsoft.Extensions.AI.LiteLlmCatalogOptions",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.LiteLlmCatalogOptions.LiteLlmCatalogOptions();",
-          "Stage": "Experimental"
-        }
-      ],
-      "Properties": [
-        {
-          "Member": "bool Microsoft.Extensions.AI.LiteLlmCatalogOptions.ChatModelsOnly { get; set; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Predicate<string>? Microsoft.Extensions.AI.LiteLlmCatalogOptions.IncludeModel { get; set; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Uri? Microsoft.Extensions.AI.LiteLlmCatalogOptions.SourceUri { get; set; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.DateTimeOffset? Microsoft.Extensions.AI.LiteLlmCatalogOptions.UpdatedAt { get; set; }",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
-      "Type": "static class Microsoft.Extensions.AI.LiteLlmModelCatalog",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "static System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.LiteLlmModelCatalog.Load(System.IO.Stream utf8Json, Microsoft.Extensions.AI.LiteLlmCatalogOptions? options = null);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "static System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.LiteLlmModelCatalog.Parse(string json, Microsoft.Extensions.AI.LiteLlmCatalogOptions? options = null);",
-          "Stage": "Experimental"
-        }
-      ],
-      "Fields": [
-        {
-          "Member": "const string Microsoft.Extensions.AI.LiteLlmModelCatalog.DeprecationDateMetadataKey",
-          "Stage": "Experimental",
-          "Value": "litellm.deprecation_date"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.LiteLlmModelCatalog.MaxOutputTokensMetadataKey",
-          "Stage": "Experimental",
-          "Value": "litellm.max_output_tokens"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.LiteLlmModelCatalog.MetadataKeyPrefix",
-          "Stage": "Experimental",
-          "Value": "litellm."
         }
       ]
     },
