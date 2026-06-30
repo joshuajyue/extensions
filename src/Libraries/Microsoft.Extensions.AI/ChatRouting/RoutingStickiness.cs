@@ -23,9 +23,15 @@ public enum RoutingStickiness
     PerInstance = 1,
 
     /// <summary>
-    /// Run the selector once per <see cref="ChatOptions.ConversationId"/> and reuse the result for subsequent requests
-    /// in that conversation. If <see cref="ChatOptions.ConversationId"/> is missing, behavior falls back to
+    /// Run the selector once per conversation and reuse the result for subsequent requests in that conversation.
+    /// The conversation key is read from the <see cref="RoutingChatClient.ConversationKeyPropertyName"/> entry in
+    /// <see cref="ChatOptions.AdditionalProperties"/>. When no key can be resolved, behavior falls back to
     /// <see cref="EveryCall"/>.
     /// </summary>
-    ByConversationId = 2,
+    /// <remarks>
+    /// This scope is deliberately decoupled from <see cref="ChatOptions.ConversationId"/>. That value is a provider
+    /// state token — absent for stateless providers and changing on every turn for some stateful ones — which makes
+    /// it unfit as a stable routing-stickiness key. The conversation key is instead owned by the caller.
+    /// </remarks>
+    ByConversation = 2,
 }

@@ -329,15 +329,19 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(Microsoft.Extensions.AI.RoutingChatModel model, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<bool>>? remainsValid = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(Microsoft.Extensions.AI.RoutingChatModel model, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<bool>>? remainsValid = null, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
           "Stage": "Experimental"
         },
         {
-          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> orderedModels, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<bool>>? remainsValid = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> orderedModels, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<bool>>? remainsValid = null, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
           "Stage": "Experimental"
         }
       ],
       "Properties": [
+        {
+          "Member": "System.Collections.Generic.IReadOnlyDictionary<string, object>? Microsoft.Extensions.AI.ChatRoutePlan.DecisionMetadata { get; }",
+          "Stage": "Experimental"
+        },
         {
           "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.ChatRoutePlan.OrderedModels { get; }",
           "Stage": "Experimental"
@@ -400,6 +404,10 @@
         },
         {
           "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.ComplexToReasoningThreshold { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "bool Microsoft.Extensions.AI.ComplexityRouterOptions.EscalateOnComplexity { get; set; }",
           "Stage": "Experimental"
         },
         {
@@ -1827,6 +1835,21 @@
       ],
       "Fields": [
         {
+          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.AttemptEventName",
+          "Stage": "Experimental",
+          "Value": "routing.attempt"
+        },
+        {
+          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.ConversationKeyPropertyName",
+          "Stage": "Experimental",
+          "Value": "routing.conversation_key"
+        },
+        {
+          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.DecisionEventName",
+          "Stage": "Experimental",
+          "Value": "routing.decision"
+        },
+        {
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedModelIdKey",
           "Stage": "Experimental",
           "Value": "routing.selected_model_id"
@@ -2046,7 +2069,7 @@
       ],
       "Fields": [
         {
-          "Member": "const Microsoft.Extensions.AI.RoutingStickiness Microsoft.Extensions.AI.RoutingStickiness.ByConversationId",
+          "Member": "const Microsoft.Extensions.AI.RoutingStickiness Microsoft.Extensions.AI.RoutingStickiness.ByConversation",
           "Stage": "Experimental",
           "Value": "2"
         },
@@ -2115,6 +2138,10 @@
       "Properties": [
         {
           "Member": "Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouterOptions.Aggregation { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "bool Microsoft.Extensions.AI.SemanticRouterOptions.ReselectBelowThreshold { get; set; }",
           "Stage": "Experimental"
         },
         {

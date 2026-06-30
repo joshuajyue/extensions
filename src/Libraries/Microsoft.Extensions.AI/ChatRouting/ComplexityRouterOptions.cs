@@ -99,4 +99,18 @@ public sealed class ComplexityRouterOptions
     [
         "first.*?then", @"step\s*\d", @"\d+\.\s", @"[a-z]\)\s",
     ];
+
+    /// <summary>
+    /// Gets or sets a value indicating whether a sticky decision is re-evaluated and allowed to escalate to a
+    /// higher tier when a later turn classifies as strictly more complex. The default is <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// This only has an effect under a sticky <see cref="RoutingStickiness"/> scope (for example
+    /// <see cref="RoutingStickiness.ByConversation"/>), where a decision would otherwise be reused unchanged.
+    /// When enabled, the selector attaches an escalation <em>ratchet</em>: the cached decision keeps being reused
+    /// while later turns classify at or below the tier that produced it, and is re-run only when a turn classifies
+    /// strictly higher (so routing moves up to a stronger model but never flaps back down on a trivial follow-up
+    /// such as "thanks!"). When disabled (the default), a sticky decision is truly frozen for its scope.
+    /// </remarks>
+    public bool EscalateOnComplexity { get; set; }
 }

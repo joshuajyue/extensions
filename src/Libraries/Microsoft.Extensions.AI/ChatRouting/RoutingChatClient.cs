@@ -65,6 +65,51 @@ public class RoutingChatClient : IChatClient
     /// <summary>The key under which the selected model's provider name is stamped onto a response.</summary>
     public const string SelectedProviderNameKey = "routing.selected_provider";
 
+    /// <summary>
+    /// The <see cref="ChatOptions.AdditionalProperties"/> key the router reads to scope a sticky routing decision when
+    /// <see cref="RoutingStickiness.ByConversation"/> is used.
+    /// </summary>
+    /// <remarks>
+    /// Set <c>options.AdditionalProperties["routing.conversation_key"]</c> to a stable, caller-owned value (for example
+    /// a GUID minted once per chat) so every request in the same logical conversation reuses one routing decision.
+    /// This is intentionally independent of <see cref="ChatOptions.ConversationId"/>, which is a provider state token
+    /// that may be absent (stateless providers) or change on every turn (some stateful providers) and is therefore
+    /// unfit as a stickiness key.
+    /// </remarks>
+    public const string ConversationKeyPropertyName = "routing.conversation_key";
+
+    /// <summary>
+    /// The name of the <see cref="ActivityEvent"/> the router adds to <see cref="Activity.Current"/> for each
+    /// model it attempts. Read these events with an <see cref="ActivityListener"/> (or any OpenTelemetry trace
+    /// exporter) to observe the full per-request attempt timeline — the order models were tried, which failed
+    /// and why, and how long each took.
+    /// </summary>
+    public const string AttemptEventName = "routing.attempt";
+
+    /// <summary>
+    /// The name of the <see cref="ActivityEvent"/> the router adds to <see cref="Activity.Current"/> once per
+    /// request describing the routing decision: the selected model, the conversation key it was scoped to (when
+    /// <see cref="RoutingStickiness.ByConversation"/> is used), and any decision-rationale a selector attached via
+    /// <see cref="ChatRoutePlan.DecisionMetadata"/> (for example a complexity tier or a semantic similarity score).
+    /// Read it with an <see cref="ActivityListener"/> or any OpenTelemetry trace exporter.
+    /// </summary>
+    public const string DecisionEventName = "routing.decision";
+
+    // Tag keys carried by each routing.attempt event. Kept private: the event/tag schema is a telemetry detail
+    // observed through ActivityListener, not a programmatic API surface.
+    private const string AttemptOrdinalKey = "routing.attempt.ordinal";
+    private const string AttemptModelKey = "routing.attempt.model";
+    private const string AttemptModelIdKey = "routing.attempt.model_id";
+    private const string AttemptProviderKey = "routing.attempt.provider";
+    private const string AttemptOutcomeKey = "routing.attempt.outcome";
+    private const string AttemptDurationMsKey = "routing.attempt.duration_ms";
+    private const string AttemptErrorTypeKey = "routing.attempt.error_type";
+
+    // routing.attempt.outcome values.
+    private const string AttemptOutcomeSuccess = "success";   // this model produced a response (or first token)
+    private const string AttemptOutcomeFallback = "fallback"; // this model failed; the router fell back to the next
+    private const string AttemptOutcomeError = "error";       // this model failed and no fallback remained (propagates)
+
     private readonly RoutingChatModel[] _models;
     private readonly ReadOnlyCollection<RoutingChatModel> _modelList;
     private readonly IChatRouteSelector? _selector;
@@ -72,7 +117,7 @@ public class RoutingChatClient : IChatClient
     private readonly Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? _fallback;
     private readonly bool _capabilityGate;
 
-    private readonly ConcurrentDictionary<string, ChatRoutePlan>? _planByConversationId;
+    private readonly ConcurrentDictionary<string, ChatRoutePlan>? _planByConversation;
     private ChatRoutePlan? _instancePlan;
 
     /// <summary>Initializes a new instance of the <see cref="RoutingChatClient"/> class.</summary>
@@ -110,9 +155,9 @@ public class RoutingChatClient : IChatClient
         _fallback = fallback;
         _capabilityGate = capabilityGate;
 
-        if (stickiness == RoutingStickiness.ByConversationId)
+        if (stickiness == RoutingStickiness.ByConversation)
         {
-            _planByConversationId = new(StringComparer.Ordinal);
+            _planByConversation = new(StringComparer.Ordinal);
         }
     }
 
@@ -128,22 +173,32 @@ public class RoutingChatClient : IChatClient
         IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
         var context = new ChatRouteContext(normalizedMessages, options, candidates);
         ChatRoutePlan plan = await GetPlanAsync(context, cancellationToken);
+        RecordDecisionEvent(plan, ResolveConversationKey(context));
 
         RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
         for (int i = 0; i < ordered.Length; i++)
         {
             RoutingChatModel model = ValidateRoutedModel(ordered[i]);
             ChatOptions? forwarded = CreateForwardedOptions(model, options);
+            long startTimestamp = Stopwatch.GetTimestamp();
 
             try
             {
                 ChatResponse response = await model.Client!.GetResponseAsync(normalizedMessages, forwarded, cancellationToken);
+                RecordAttemptEvent(i + 1, model, AttemptOutcomeSuccess, startTimestamp, error: null);
                 StampResponse(response, model);
                 return response;
             }
-            catch (Exception) when (i < ordered.Length - 1 && !cancellationToken.IsCancellationRequested)
+            catch (Exception ex) when (i < ordered.Length - 1 && !cancellationToken.IsCancellationRequested)
             {
+                RecordAttemptEvent(i + 1, model, AttemptOutcomeFallback, startTimestamp, ex);
+
                 // Fall back to the next model in the attempt order.
+            }
+            catch (Exception ex)
+            {
+                RecordAttemptEvent(i + 1, model, AttemptOutcomeError, startTimestamp, ex);
+                throw;
             }
         }
 
@@ -163,12 +218,14 @@ public class RoutingChatClient : IChatClient
         IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
         var context = new ChatRouteContext(normalizedMessages, options, candidates);
         ChatRoutePlan plan = await GetPlanAsync(context, cancellationToken);
+        RecordDecisionEvent(plan, ResolveConversationKey(context));
 
         RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
         for (int i = 0; i < ordered.Length; i++)
         {
             RoutingChatModel model = ValidateRoutedModel(ordered[i]);
             ChatOptions? forwarded = CreateForwardedOptions(model, options);
+            long startTimestamp = Stopwatch.GetTimestamp();
 
             IAsyncEnumerator<ChatResponseUpdate> enumerator =
                 model.Client!.GetStreamingResponseAsync(normalizedMessages, forwarded, cancellationToken).GetAsyncEnumerator(cancellationToken);
@@ -179,17 +236,23 @@ public class RoutingChatClient : IChatClient
                 // Fallback applies only until the first update is produced.
                 hasFirst = await enumerator.MoveNextAsync();
             }
-            catch (Exception) when (i < ordered.Length - 1 && !cancellationToken.IsCancellationRequested)
+            catch (Exception ex) when (i < ordered.Length - 1 && !cancellationToken.IsCancellationRequested)
             {
+                RecordAttemptEvent(i + 1, model, AttemptOutcomeFallback, startTimestamp, ex);
                 await enumerator.DisposeAsync();
                 continue;
             }
-            catch
+            catch (Exception ex)
             {
+                RecordAttemptEvent(i + 1, model, AttemptOutcomeError, startTimestamp, ex);
                 await enumerator.DisposeAsync();
                 throw;
             }
 
+            // The first token committed this model: from the router's perspective the attempt succeeded, and
+            // the recorded duration is its time-to-first-token. Mid-stream failures past here are not a routing
+            // fallback decision, so they are not recorded as attempts.
+            RecordAttemptEvent(i + 1, model, AttemptOutcomeSuccess, startTimestamp, error: null);
             StampActivity(model);
             try
             {
@@ -271,29 +334,43 @@ public class RoutingChatClient : IChatClient
                 return plan;
             }
 
-            case RoutingStickiness.ByConversationId:
+            case RoutingStickiness.ByConversation:
             {
-                string? conversationId = context.Options?.ConversationId;
-                if (string.IsNullOrWhiteSpace(conversationId))
+                string? conversationKey = ResolveConversationKey(context);
+                if (string.IsNullOrWhiteSpace(conversationKey))
                 {
-                    // Without a conversation id there is nothing to key on; behave like EveryCall.
+                    // Without a conversation key there is nothing to scope on; behave like EveryCall.
                     return await RunSelectorAsync(context, cancellationToken);
                 }
 
-                if (_planByConversationId!.TryGetValue(conversationId!, out ChatRoutePlan? cached) &&
+                if (_planByConversation!.TryGetValue(conversationKey!, out ChatRoutePlan? cached) &&
                     await PlanRemainsValidAsync(cached, context, cancellationToken))
                 {
                     return cached;
                 }
 
                 ChatRoutePlan plan = await RunSelectorAsync(context, cancellationToken);
-                _planByConversationId[conversationId!] = plan;
+                _planByConversation[conversationKey!] = plan;
                 return plan;
             }
 
             default:
                 return await RunSelectorAsync(context, cancellationToken);
         }
+    }
+
+    // Resolves the key that scopes a ByConversation sticky decision from the caller-owned AdditionalProperties entry.
+    // This is intentionally decoupled from ChatOptions.ConversationId, which is a provider state token (absent for
+    // stateless providers, churns per-turn for some stateful ones) and so unfit as a stickiness key.
+    private static string? ResolveConversationKey(ChatRouteContext context)
+    {
+        if (context.Options?.AdditionalProperties is { } props &&
+            props.TryGetValue(ConversationKeyPropertyName, out object? value))
+        {
+            return value as string;
+        }
+
+        return null;
     }
 
     private ValueTask<ChatRoutePlan> RunSelectorAsync(ChatRouteContext context, CancellationToken cancellationToken) =>
@@ -447,15 +524,29 @@ public class RoutingChatClient : IChatClient
 
     private static ChatOptions? CreateForwardedOptions(RoutingChatModel model, ChatOptions? options)
     {
-        // Only the provider model id is forwarded, and only when the caller did not pin one.
-        // Routing internals are never written into the forwarded request.
-        if (model.ModelId is null || options?.ModelId is not null)
+        // The router forwards the caller's options, but two routing internals must not ride along to the
+        // provider: the chosen provider model id is supplied only when the caller did not pin one, and the
+        // conversation-key property the router reads for ByConversation stickiness is stripped so it never
+        // reaches the model. Both are applied on a clone, leaving the caller's options untouched.
+        bool setModelId = model.ModelId is not null && options?.ModelId is null;
+        bool stripConversationKey = options?.AdditionalProperties?.ContainsKey(ConversationKeyPropertyName) == true;
+
+        if (!setModelId && !stripConversationKey)
         {
             return options;
         }
 
         ChatOptions forwarded = options?.Clone() ?? new ChatOptions();
-        forwarded.ModelId = model.ModelId;
+        if (setModelId)
+        {
+            forwarded.ModelId = model.ModelId;
+        }
+
+        if (stripConversationKey)
+        {
+            _ = forwarded.AdditionalProperties!.Remove(ConversationKeyPropertyName);
+        }
+
         return forwarded;
     }
 
@@ -493,6 +584,77 @@ public class RoutingChatClient : IChatClient
                 _ = activity.SetTag(SelectedModelIdKey, model.ModelId);
             }
         }
+    }
+
+    // Adds one routing.attempt event to the ambient span describing a single model attempt: its order, model
+    // identity, outcome (success/fallback/error), elapsed time, and — on failure — the exception type. This is
+    // the per-attempt timeline that StampActivity (winner-only) does not capture. It is a no-op unless a
+    // listener is recording the current activity, so the cost is only paid when telemetry is being collected.
+    private static void RecordAttemptEvent(int ordinal, RoutingChatModel model, string outcome, long startTimestamp, Exception? error)
+    {
+        Activity? activity = Activity.Current;
+        if (activity is not { IsAllDataRequested: true })
+        {
+            return;
+        }
+
+        var tags = new ActivityTagsCollection
+        {
+            [AttemptOrdinalKey] = ordinal,
+            [AttemptModelKey] = model.Name,
+            [AttemptOutcomeKey] = outcome,
+            [AttemptDurationMsKey] = FunctionInvocationHelpers.GetElapsedTime(startTimestamp).TotalMilliseconds,
+        };
+
+        if (model.ModelId is not null)
+        {
+            tags[AttemptModelIdKey] = model.ModelId;
+        }
+
+        if (model.ProviderName is not null)
+        {
+            tags[AttemptProviderKey] = model.ProviderName;
+        }
+
+        if (error is not null)
+        {
+            tags[AttemptErrorTypeKey] = error.GetType().FullName;
+        }
+
+        _ = activity.AddEvent(new ActivityEvent(AttemptEventName, tags: tags));
+    }
+
+    // Adds one routing.decision event to the ambient span describing the selected plan: the primary model, the
+    // conversation key the decision was scoped to (when present), and any decision-rationale the selector attached
+    // (complexity tier, semantic score, ...). Fires once per request — including when a sticky decision is reused —
+    // so the rationale reflects the decision in force. No-op unless a listener is recording the current activity.
+    private static void RecordDecisionEvent(ChatRoutePlan plan, string? conversationKey)
+    {
+        Activity? activity = Activity.Current;
+        if (activity is not { IsAllDataRequested: true })
+        {
+            return;
+        }
+
+        var tags = new ActivityTagsCollection
+        {
+            [SelectedModelNameKey] = plan.OrderedModels[0].Name,
+        };
+
+        if (!string.IsNullOrWhiteSpace(conversationKey))
+        {
+            tags[ConversationKeyPropertyName] = conversationKey;
+        }
+
+        if (plan.DecisionMetadata is { } metadata)
+        {
+            foreach (KeyValuePair<string, object> entry in metadata)
+            {
+                tags[entry.Key] = entry.Value;
+            }
+        }
+
+        _ = activity.AddEvent(new ActivityEvent(DecisionEventName, tags: tags));
     }
 
     private static IEnumerable<ChatMessage> NormalizeMessages(IEnumerable<ChatMessage> messages) =>

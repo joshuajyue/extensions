@@ -166,8 +166,10 @@ The heart of the feature, and an `IChatClient` itself. Responsibilities, in orde
    - `EveryCall` → run the selector every time.
    - `PerInstance` → run once, cache on the instance (`_instancePlan`, guarded with
      `Volatile.Read/Write`), reuse for all later requests.
-   - `ByConversationId` → cache per `ChatOptions.ConversationId` in a `ConcurrentDictionary`; with no
-     conversation id, transparently behave like `EveryCall`.
+   - `ByConversation` → cache per **conversation key** (the
+     `RoutingChatClient.ConversationKeyPropertyName` entry in `ChatOptions.AdditionalProperties`,
+     a caller-owned value deliberately decoupled from the provider's `ConversationId`) in a
+     `ConcurrentDictionary`; with no key, transparently behave like `EveryCall`.
    Before reusing any cached plan it awaits `PlanRemainsValidAsync`, which calls the plan's
    `RemainsValid` predicate (if any) and re-runs the selector when it returns `false`.
 4. **Run the selector** (`RunSelectorAsync`) — or, when no selector was supplied, the opinion-free
@@ -196,6 +198,13 @@ committed (you can't un-send bytes), so later failures propagate. Only the first
 Other details:
 - **`GetService`** returns `this` for a matching service type, and exposes the selector when asked
   (so middleware can discover the active policy).
+- **Trace events.** Alongside the response stamping, the router records two kinds of `ActivityEvent`
+  on `Activity.Current` (each a no-op unless the activity is recording): one `routing.decision`
+  event per request (selected model + conversation key + any selector rationale such as the
+  complexity tier or semantic score it stamped onto `ChatRoutePlan.DecisionMetadata`), and one
+  `routing.attempt` event per model tried (the fallback timeline). It creates no `ActivitySource` of
+  its own. Event names are public consts (`RoutingChatClient.DecisionEventName` /
+  `AttemptEventName`); tag schemas are documented in [routing-chat-client.md](routing-chat-client.md).
 - **`Dispose`** disposes each distinct inner `IChatClient` exactly once (a `HashSet` dedupes the case
   where the same client backs multiple models).
 - **Validation**: `ValidateModels` requires ≥1 model, each bound to a client; `ValidateRoutedModel`
@@ -263,12 +272,21 @@ quality: most modern chat models share the same flags, so traits cannot rank mod
 ### `RoutingStickiness.cs` — the caching *scope*
 
 An enum: `EveryCall` (re-decide every request), `PerInstance` (decide once per client instance),
-`ByConversationId` (decide once per `ConversationId`, falling back to `EveryCall` when absent).
+`ByConversation` (decide once per caller-owned **conversation key** — the
+`RoutingChatClient.ConversationKeyPropertyName` entry in `ChatOptions.AdditionalProperties` —
+falling back to `EveryCall` when absent). The key is intentionally **not** `ChatOptions.ConversationId`,
+which is a provider state token (absent for stateless providers, rewritten per-turn by some stateful
+ones) and so unfit as a stable stickiness key.
 
 Crucially, stickiness is **only the "when do I reuse a cached decision?" half**. The complementary
 "when is a cached decision no longer valid?" half belongs to the *policy* and is expressed by
 `ChatRoutePlan.RemainsValid`. Together they let you say "stick per conversation, but re-route if the
-selector's own validity rule says the situation changed."
+selector's own validity rule says the situation changed." The two shipped selectors expose that
+invalidation behind one opt-in toggle each — `ComplexityRouterOptions.EscalateOnComplexity` (an
+escalation ratchet that re-routes only when a later turn is strictly more complex) and
+`SemanticRouterOptions.ReselectBelowThreshold` (a confidence floor that re-routes once the pinned
+model drifts below its score threshold) — both off by default, both effective only under a sticky
+scope. See [routing-chat-client.md](routing-chat-client.md).
 
 ---
 
@@ -298,6 +316,9 @@ utterances are most cosine-similar, using the same algorithm LiteLLM does.
 
 This is the heavier, "understands intent" policy — appropriate when keyword rules are too brittle.
 Tune it with `SemanticRouterOptions` (`TopK`, `Aggregation`, `ScoreThreshold`, `ScoreThresholdByModel`).
+Set `ReselectBelowThreshold = true` to make a sticky decision adaptive: the selector attaches a
+confidence floor (`RemainsValid`) that re-embeds each later turn and re-routes once the pinned model
+drifts below its score threshold, reusing the existing threshold as the single knob.
 
 ### `ComplexityChatRouteSelector.cs` (+ `ComplexityRouterOptions.cs`, `ChatComplexityTier.cs`)
 
@@ -336,6 +357,10 @@ token count, and question count read the user message only. (The full scoring ta
 worked example are in [`routing-chat-client.md`](./routing-chat-client.md#how-litellms-complexity-router-works-and-how-this-port-mirrors-it).)
 
 `ClassifyTier(messages)` is public so callers can get the tier without routing (no-user ⇒ `Medium`).
+Set `EscalateOnComplexity = true` to make a sticky decision adaptive: the selector attaches an
+escalation ratchet (`RemainsValid`) that reuses the cached decision while later turns classify at or
+below the pinned tier and re-routes only when one classifies strictly higher — routing up to a
+stronger model on a genuine jump in difficulty without flapping down on a trivial follow-up.
 
 ### `ChatModelCatalog.cs` (+ `ChatModelCatalogOptions.cs`) — the catalog adapter
 
@@ -382,9 +407,10 @@ each mechanism guarantee:
   rejects duplicate model names.
 - **Default selector:** forwards the model id, stamps the response, and crucially **does not leak**
   routing internals into the forwarded request; honors an explicit `ChatOptions.ModelId`.
-- **Stickiness:** `PerInstance` reuses the first selected model; `ByConversationId` sticks per
-  conversation and falls back to `EveryCall` without a conversation id; `RemainsValid` causes a sticky
-  hit to be reused *and* re-selected once invalidated (the policy-side invalidation half).
+- **Stickiness:** `PerInstance` reuses the first selected model; `ByConversation` sticks per
+  conversation key and falls back to `EveryCall` without one; `RemainsValid` causes a sticky
+  hit to be reused *and* re-selected once invalidated (the policy-side invalidation half), including
+  the selectors' built-in `EscalateOnComplexity` ratchet and `ReselectBelowThreshold` floor.
 - **Fallback:** walks the plan on failure and stamps the model that actually succeeded; propagates the
   last exception when the chain is exhausted; throws when a selector routes to an unregistered model.
 - **Streaming:** stamps only the first update; falls back before the first update is produced.

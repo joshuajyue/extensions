@@ -51,4 +51,20 @@ public sealed class SemanticRouterOptions
     /// semantic router. The default is <see langword="null"/> (every model uses <see cref="ScoreThreshold"/>).
     /// </summary>
     public IReadOnlyDictionary<string, float>? ScoreThresholdByModel { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether a sticky decision is re-evaluated and re-routed when the pinned
+    /// model's similarity to a later turn falls below its selection threshold. The default is <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// This only has an effect under a sticky <see cref="RoutingStickiness"/> scope (for example
+    /// <see cref="RoutingStickiness.ByConversation"/>), where a decision would otherwise be reused unchanged.
+    /// When enabled, the selector attaches a confidence <em>floor</em>: a decision that won by meeting its
+    /// threshold keeps being reused while the pinned model still scores at or above that same threshold for later
+    /// turns (its per-model override in <see cref="ScoreThresholdByModel"/>, else <see cref="ScoreThreshold"/>),
+    /// and is re-run once the conversation drifts below it. The floor reuses the selection threshold, so
+    /// <see cref="ScoreThreshold"/> (and any per-model override) is the single, modifiable knob. When disabled
+    /// (the default), a sticky decision is truly frozen for its scope.
+    /// </remarks>
+    public bool ReselectBelowThreshold { get; set; }
 }

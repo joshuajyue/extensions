@@ -150,6 +150,12 @@ public sealed class RoutingChatClientBuilder
     /// <summary>Sets how a routing decision is cached and reused across requests.</summary>
     /// <param name="stickiness">The stickiness scope.</param>
     /// <returns>The current builder.</returns>
+    /// <remarks>
+    /// For <see cref="RoutingStickiness.ByConversation"/>, scope a sticky decision by setting the
+    /// <see cref="RoutingChatClient.ConversationKeyPropertyName"/> entry in <see cref="ChatOptions.AdditionalProperties"/>
+    /// to a stable, caller-owned value (for example a GUID minted once per chat). When no key is present, the request
+    /// falls back to <see cref="RoutingStickiness.EveryCall"/>.
+    /// </remarks>
     public RoutingChatClientBuilder UseStickiness(RoutingStickiness stickiness)
     {
         _stickiness = stickiness;

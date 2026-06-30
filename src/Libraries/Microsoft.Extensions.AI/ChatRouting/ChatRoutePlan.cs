@@ -28,19 +28,23 @@ public sealed class ChatRoutePlan
     /// <summary>Initializes a new instance of the <see cref="ChatRoutePlan"/> class with a single model.</summary>
     /// <param name="model">The model to route to.</param>
     /// <param name="remainsValid">An optional predicate that determines whether a cached decision is still valid.</param>
+    /// <param name="decisionMetadata">Optional decision-rationale metadata the router surfaces in telemetry.</param>
     public ChatRoutePlan(
         RoutingChatModel model,
-        Func<ChatRouteContext, CancellationToken, ValueTask<bool>>? remainsValid = null)
-        : this([Throw.IfNull(model)], remainsValid)
+        Func<ChatRouteContext, CancellationToken, ValueTask<bool>>? remainsValid = null,
+        IReadOnlyDictionary<string, object>? decisionMetadata = null)
+        : this([Throw.IfNull(model)], remainsValid, decisionMetadata)
     {
     }
 
     /// <summary>Initializes a new instance of the <see cref="ChatRoutePlan"/> class with an ordered list of models.</summary>
     /// <param name="orderedModels">The models to route to, primary first followed by fallbacks.</param>
     /// <param name="remainsValid">An optional predicate that determines whether a cached decision is still valid.</param>
+    /// <param name="decisionMetadata">Optional decision-rationale metadata the router surfaces in telemetry.</param>
     public ChatRoutePlan(
         IReadOnlyList<RoutingChatModel> orderedModels,
-        Func<ChatRouteContext, CancellationToken, ValueTask<bool>>? remainsValid = null)
+        Func<ChatRouteContext, CancellationToken, ValueTask<bool>>? remainsValid = null,
+        IReadOnlyDictionary<string, object>? decisionMetadata = null)
     {
         _ = Throw.IfNull(orderedModels);
         if (orderedModels.Count == 0)
@@ -56,6 +60,7 @@ public sealed class ChatRoutePlan
 
         OrderedModels = new ReadOnlyCollection<RoutingChatModel>(copy);
         RemainsValid = remainsValid;
+        DecisionMetadata = decisionMetadata;
     }
 
     /// <summary>Gets the models to route to, primary first followed by fallbacks tried in order on failure.</summary>
@@ -68,4 +73,13 @@ public sealed class ChatRoutePlan
     /// the selector if it returns <see langword="false"/>.
     /// </remarks>
     public Func<ChatRouteContext, CancellationToken, ValueTask<bool>>? RemainsValid { get; }
+
+    /// <summary>Gets optional decision-rationale metadata describing why the selector chose this plan.</summary>
+    /// <remarks>
+    /// A selector may annotate its decision with signals such as a complexity tier or a semantic similarity
+    /// score. The router surfaces each entry as a tag on its <c>routing.decision</c>
+    /// <see cref="System.Diagnostics.ActivityEvent"/> (see <see cref="RoutingChatClient.DecisionEventName"/>),
+    /// so it is observable through any OpenTelemetry trace exporter without affecting routing behavior.
+    /// </remarks>
+    public IReadOnlyDictionary<string, object>? DecisionMetadata { get; }
 }

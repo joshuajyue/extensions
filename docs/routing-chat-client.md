@@ -27,7 +27,7 @@ Every knob lands on one side of a single litmus test:
 > If yes, it is a **selector** (policy). If it is only about **identity / scope / caching /
 > transport**, it is the **router** (mechanism).
 
-- "the conversation id is the cache key" → identity → **router** (`RoutingStickiness`).
+- "the conversation key is the cache key" → identity → **router** (`RoutingStickiness`).
 - "a jump in complexity should re-route" → judges the request → **selector**
   (`ChatRoutePlan.RemainsValid`).
 
@@ -108,7 +108,7 @@ IChatClient root = new RoutingChatClientBuilder(catalog)
         inputTokenCostPerMillion: 1,
         outputTokenCostPerMillion: 2,
         typicalLatency: TimeSpan.FromMilliseconds(250))
-    .UseStickiness(RoutingStickiness.ByConversationId)
+    .UseStickiness(RoutingStickiness.ByConversation)
     .Build();
 
 // Cross-cutting middleware is layered after the routing root is created.
@@ -118,7 +118,11 @@ IChatClient client = root
     .UseOpenTelemetry()
     .Build();
 
-var options = new ChatOptions { ConversationId = "conv-123" };
+// ByConversation stickiness is scoped by a caller-owned key (see Stickiness), not ConversationId.
+var options = new ChatOptions
+{
+    AdditionalProperties = new() { [RoutingChatClient.ConversationKeyPropertyName] = "conv-123" },
+};
 var response = await client.GetResponseAsync(messages, options);
 ```
 
@@ -399,10 +403,28 @@ Stickiness is split across the mechanism/policy line:
 - **Caching scope (router).** `RoutingStickiness` selects how a decision is cached:
   - `EveryCall` — run the selector for every request.
   - `PerInstance` — run once per `RoutingChatClient` and reuse for all requests.
-  - `ByConversationId` — run once per `ChatOptions.ConversationId` and reuse within that
-    conversation. If the conversation id is missing, behavior falls back to `EveryCall`.
+  - `ByConversation` — run once per **conversation key** and reuse within that conversation. The
+    key is read from the `RoutingChatClient.ConversationKeyPropertyName`
+    (`"routing.conversation_key"`) entry in `ChatOptions.AdditionalProperties`; if no key can be
+    resolved, behavior falls back to `EveryCall`.
 
   These are pure cache scopes with no opinion about model fitness.
+
+  > **Why a caller-owned key, not `ChatOptions.ConversationId`?** `ConversationId` is a *provider
+  > state token*: it is absent for stateless providers (e.g. GitHub Models) and is rewritten on
+  > every turn by some stateful ones, which makes it unfit as a stable stickiness key. The
+  > conversation key is therefore owned by the **caller** — mint a stable value (for example a GUID
+  > created once per chat) and put it in `AdditionalProperties` on every turn of that conversation.
+  > The router strips the key off the request it forwards, so it never reaches the model client.
+
+  ```csharp
+  // One stable key per chat; reuse it on every turn so the conversation sticks to one decision.
+  string conversationKey = Guid.NewGuid().ToString("N");
+  var options = new ChatOptions
+  {
+      AdditionalProperties = new() { [RoutingChatClient.ConversationKeyPropertyName] = conversationKey },
+  };
+  ```
 
 - **Invalidation (selector).** Before reusing a cached decision, the router awaits the plan's
   optional `RemainsValid(context, cancellationToken)` predicate. If it returns `false`, the
@@ -426,6 +448,53 @@ Stickiness is split across the mechanism/policy line:
   Never encode a drift threshold as a router stickiness *mode* — that would smuggle selection
   back into the mechanism.
 
+## Selector-native adaptive re-selection
+
+Authoring a `RemainsValid` predicate by hand is the general-purpose escape hatch. The two shipped
+selectors also offer **built-in** invalidation rules behind a single opt-in toggle each, so the
+common "stick, but adapt" patterns need no custom predicate. Both toggles are **off by default** —
+a sticky decision is truly frozen for its scope unless you opt in — and both only have an effect
+under a sticky scope (`PerInstance` or `ByConversation`), since `RemainsValid` is never consulted
+under `EveryCall`.
+
+- **Complexity — escalation ratchet** (`ComplexityRouterOptions.EscalateOnComplexity = true`).
+  The selector remembers the tier that produced the decision and attaches a `RemainsValid` that
+  reuses it while later turns classify **at or below** that tier, re-running only when a turn
+  classifies **strictly higher**. Routing therefore moves *up* to a stronger model when the
+  conversation genuinely gets harder, but never flaps back *down* on a trivial follow-up such as
+  "thanks!". (`ChatComplexityTier` is ordinal: `Simple < Medium < Complex < Reasoning`.)
+
+  ```csharp
+  builder
+      .UseSelector(new ComplexityChatRouteSelector(
+          tierMap,
+          options: new ComplexityRouterOptions { EscalateOnComplexity = true }))
+      .UseStickiness(RoutingStickiness.ByConversation);
+  ```
+
+- **Semantic — confidence floor** (`SemanticRouterOptions.ReselectBelowThreshold = true`).
+  A decision that won by meeting its score threshold attaches a `RemainsValid` that re-embeds each
+  later turn and keeps the pinned model while it still scores **at or above** that same threshold
+  (its per-model override in `ScoreThresholdByModel`, else `ScoreThreshold`), re-running once the
+  conversation drifts below it. The floor reuses the existing selection threshold, so
+  `ScoreThreshold` is the single, modifiable knob — there is no separate floor setting. (A decision
+  that fell through to the `defaultModel` because nothing passed the threshold is left frozen — it
+  had no confidence to lose.)
+
+  ```csharp
+  builder
+      .UseSelector(new SemanticChatRouteSelector(
+          embeddingGenerator,
+          profiles,
+          options: new SemanticRouterOptions { ReselectBelowThreshold = true }))
+      .UseStickiness(RoutingStickiness.ByConversation);
+  ```
+
+Mechanically, each toggle just makes the selector emit a plan whose `RemainsValid` encodes that
+rule — the router runs it through the same `PlanRemainsValidAsync` path as a hand-written predicate.
+The knob lives on the selector's options (next to the logic that judges the request), and
+`RoutingStickiness` stays a pure, orthogonal caching scope.
+
 ## Decision output
 
 The chosen model is recorded on the **response**, not mutated into the forwarded request:
@@ -439,11 +508,41 @@ The chosen model is recorded on the **response**, not mutated into the forwarded
 Only the provider `ModelId` is forwarded to the chosen client, and only when the caller did
 not pin one. Routing internals are never written into the forwarded `ChatOptions`.
 
+## Routing telemetry (trace events)
+
+Beyond the response-side stamping above, the router emits two kinds of **`ActivityEvent`** onto
+whatever `Activity.Current` is in scope when a request runs. It does **not** create its own
+`ActivitySource` — events land on the ambient activity, so wrapping the router with
+`UseOpenTelemetry()` (source `Experimental.Microsoft.Extensions.AI`) or starting your own activity
+captures them. Both are cheap: each is a no-op unless `Activity.Current is { IsAllDataRequested: true }`,
+so an unsampled request pays nothing. Read them back with any OpenTelemetry exporter or a plain
+`ActivityListener`.
+
+- **`RoutingChatClient.DecisionEventName` (`"routing.decision"`)** — one per request, describing the
+  decision the selector made:
+  - `routing.selected_model` — the chosen model's `Name`.
+  - `routing.conversation_key` — the sticky scope key, when `ByConversation` resolved one.
+  - any **decision-rationale** a selector stamped onto `ChatRoutePlan.DecisionMetadata`. The shipped
+    selectors emit `routing.complexity.tier` (the classified tier, as a string) and
+    `routing.semantic.score` (the winning model's aggregated cosine similarity, as a double).
+
+- **`RoutingChatClient.AttemptEventName` (`"routing.attempt"`)** — one per model the router actually
+  tries, in attempt order, capturing the fallback timeline: tags `routing.attempt.ordinal`,
+  `routing.attempt.model`, `routing.attempt.model_id`, `routing.attempt.outcome`
+  (`success` / `fallback` / `error`), `routing.attempt.duration_ms`, and (on failure)
+  `routing.attempt.error_type`.
+
+The decision event answers *why this model* (rationale + scope); the attempt events answer *what the
+router did* (which models were tried, which failed and why, how long each took). The decision-metadata
+tag keys are a telemetry detail (private consts in the selectors), not a programmatic API — observe
+them through tracing, don't bind to them in code. `DecisionEventName` and `AttemptEventName`
+themselves are public so consumers can filter the event stream by name.
+
 ## ChatOptions as a metadata carrier
 
-- **Inputs** (caller hints such as a pinned model or `ConversationId`) are read from
-  `ChatOptions`.
-- **Outputs** are response-side only (see Decision output).
+- **Inputs** (caller hints such as a pinned model, a `ConversationId`, or the
+  `routing.conversation_key` stickiness scope) are read from `ChatOptions`.
+- **Outputs** are response-side only (see Decision output) plus the trace events above.
 
 ## Future work
 

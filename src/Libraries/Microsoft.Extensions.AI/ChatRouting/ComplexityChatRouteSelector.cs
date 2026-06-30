@@ -67,10 +67,15 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
 
     private static readonly TimeSpan _regexTimeout = TimeSpan.FromMilliseconds(100);
 
+    // Decision-rationale key surfaced as a routing.decision tag (string tier name). Kept private: the
+    // tag schema is a telemetry detail observed through ActivityListener, not a programmatic API surface.
+    private const string ComplexityTierMetadataKey = "routing.complexity.tier";
+
     private readonly Dictionary<ChatComplexityTier, string> _modelByTier;
     private readonly string? _defaultModel;
     private readonly ComplexityRouterOptions _options;
     private readonly Regex[] _multiStepPatterns;
+    private readonly bool _escalateOnComplexity;
 
     /// <summary>Initializes a new instance of the <see cref="ComplexityChatRouteSelector"/> class.</summary>
     /// <param name="modelByTier">
@@ -94,6 +99,7 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
         _modelByTier = modelByTier.ToDictionary(static pair => pair.Key, static pair => pair.Value);
         _defaultModel = defaultModel;
         _options = options ?? new ComplexityRouterOptions();
+        _escalateOnComplexity = _options.EscalateOnComplexity;
 
         var multiStep = new List<Regex>(_options.MultiStepPatterns.Count);
         foreach (string pattern in _options.MultiStepPatterns)
@@ -111,21 +117,38 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
 
         (string? userText, string? systemText) = ExtractUserAndSystem(ctx.Messages);
 
+        ChatComplexityTier tier;
         string? targetName;
         if (userText is null)
         {
-            // Faithful to LiteLLM: with no user message there is nothing to score, so prefer the
-            // explicit default model, falling back to whatever is mapped to the Medium tier.
+            // Faithful to LiteLLM: with no user message there is nothing to score, so this classifies as
+            // Medium and prefers the explicit default model, falling back to whatever is mapped to Medium.
+            tier = ChatComplexityTier.Medium;
             targetName = _defaultModel ?? (_modelByTier.TryGetValue(ChatComplexityTier.Medium, out string? medium) ? medium : null);
         }
         else
         {
-            ChatComplexityTier tier = Classify(userText, systemText, _options, _multiStepPatterns);
+            tier = Classify(userText, systemText, _options, _multiStepPatterns);
             targetName = _modelByTier.TryGetValue(tier, out string? mapped) ? mapped : _defaultModel;
         }
 
         RoutingChatModel target = SelectTarget(ctx.Models, targetName);
-        return new ValueTask<ChatRoutePlan>(new ChatRoutePlan(target));
+
+        var metadata = new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            [ComplexityTierMetadataKey] = tier.ToString(),
+        };
+
+        // Under a sticky scope, the optional escalation ratchet keeps reusing this decision while later turns
+        // classify at or below the tier that produced it, re-routing only when a turn classifies strictly higher.
+        Func<ChatRouteContext, CancellationToken, ValueTask<bool>>? remainsValid = null;
+        if (_escalateOnComplexity)
+        {
+            ChatComplexityTier pinnedTier = tier;
+            remainsValid = (newContext, _) => new ValueTask<bool>(ClassifyTier(newContext.Messages) <= pinnedTier);
+        }
+
+        return new ValueTask<ChatRoutePlan>(new ChatRoutePlan(target, remainsValid, metadata));
     }
 
     /// <summary>Classifies the request into a complexity tier using the configured rule-based scoring.</summary>

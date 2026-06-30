@@ -3,6 +3,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
@@ -111,7 +113,7 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task ByConversationIdStickiness_SticksPerConversation()
+    public async Task ByConversationStickiness_SticksPerConversation()
     {
         var r1 = new ChatResponse(new ChatMessage(ChatRole.Assistant, "one"));
         var r2 = new ChatResponse(new ChatMessage(ChatRole.Assistant, "two"));
@@ -126,11 +128,11 @@ public class RoutingChatClientTests
         using var client = new RoutingChatClient(
             [new RoutingChatModel("m1", client: c1), new RoutingChatModel("m2", client: c2)],
             selector,
-            RoutingStickiness.ByConversationId);
+            RoutingStickiness.ByConversation);
 
-        ChatResponse c1First = await client.GetResponseAsync([new(ChatRole.User, "turn1")], new ChatOptions { ConversationId = "c1" });
-        ChatResponse c1Second = await client.GetResponseAsync([new(ChatRole.User, "turn2")], new ChatOptions { ConversationId = "c1" });
-        ChatResponse c2First = await client.GetResponseAsync([new(ChatRole.User, "turn3")], new ChatOptions { ConversationId = "c2" });
+        ChatResponse c1First = await client.GetResponseAsync([new(ChatRole.User, "turn1")], WithConversationKey("c1"));
+        ChatResponse c1Second = await client.GetResponseAsync([new(ChatRole.User, "turn2")], WithConversationKey("c1"));
+        ChatResponse c2First = await client.GetResponseAsync([new(ChatRole.User, "turn3")], WithConversationKey("c2"));
 
         Assert.Same(r1, c1First);
         Assert.Same(r1, c1Second);
@@ -138,7 +140,7 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task ByConversationIdStickiness_WithoutConversationIdFallsBackToEveryCall()
+    public async Task ByConversationStickiness_WithoutConversationKeyFallsBackToEveryCall()
     {
         var r1 = new ChatResponse(new ChatMessage(ChatRole.Assistant, "one"));
         var r2 = new ChatResponse(new ChatMessage(ChatRole.Assistant, "two"));
@@ -153,13 +155,74 @@ public class RoutingChatClientTests
         using var client = new RoutingChatClient(
             [new RoutingChatModel("m1", client: c1), new RoutingChatModel("m2", client: c2)],
             selector,
-            RoutingStickiness.ByConversationId);
+            RoutingStickiness.ByConversation);
 
         ChatResponse first = await client.GetResponseAsync([new(ChatRole.User, "turn1")]);
-        ChatResponse second = await client.GetResponseAsync([new(ChatRole.User, "turn2")], new ChatOptions { ConversationId = "" });
+        ChatResponse second = await client.GetResponseAsync([new(ChatRole.User, "turn2")], new ChatOptions());
 
         Assert.Same(r1, first);
         Assert.Same(r2, second);
+    }
+
+    [Fact]
+    public async Task ByConversationStickiness_SeparateKeysGetSeparateDecisions()
+    {
+        var r1 = new ChatResponse(new ChatMessage(ChatRole.Assistant, "one"));
+        var r2 = new ChatResponse(new ChatMessage(ChatRole.Assistant, "two"));
+
+        using var c1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r1) };
+        using var c2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r2) };
+
+        int selectionCount = 0;
+        IChatRouteSelector selector = ChatRouteSelector.Create(
+            ctx => new ChatRoutePlan(ctx.Models[selectionCount++ % ctx.Models.Count]));
+
+        using var client = new RoutingChatClientBuilder()
+            .AddModel(new RoutingChatModel("m1", client: c1))
+            .AddModel(new RoutingChatModel("m2", client: c2))
+            .UseSelector(selector)
+            .UseStickiness(RoutingStickiness.ByConversation)
+            .Build();
+
+        ChatResponse a1 = await client.GetResponseAsync([new(ChatRole.User, "x")], WithConversationKey("conv-a"));
+        ChatResponse a2 = await client.GetResponseAsync([new(ChatRole.User, "y")], WithConversationKey("conv-a"));
+        ChatResponse b1 = await client.GetResponseAsync([new(ChatRole.User, "z")], WithConversationKey("conv-b"));
+
+        Assert.Same(r1, a1);
+        Assert.Same(r1, a2);
+        Assert.Same(r2, b1);
+    }
+
+    [Fact]
+    public async Task ByConversationStickiness_DoesNotLeakConversationKeyToInnerClient()
+    {
+        var response = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+
+        var probe = new ForwardedOptionsProbe();
+        using var inner = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, options, _) =>
+            {
+                probe.Invoked = true;
+                probe.HadConversationKey = options?.AdditionalProperties?.ContainsKey(RoutingChatClient.ConversationKeyPropertyName) ?? false;
+                return Task.FromResult(response);
+            },
+        };
+
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("m1", modelId: "provider/m1", client: inner)],
+            selector: null,
+            RoutingStickiness.ByConversation);
+
+        ChatOptions callerOptions = WithConversationKey("conv-1");
+        _ = await client.GetResponseAsync([new(ChatRole.User, "hi")], callerOptions);
+
+        // The router strips its own conversation key from the options forwarded to the model.
+        Assert.True(probe.Invoked);
+        Assert.False(probe.HadConversationKey);
+
+        // The caller's original options are left untouched.
+        Assert.True(callerOptions.AdditionalProperties?.ContainsKey(RoutingChatClient.ConversationKeyPropertyName) == true);
     }
 
     [Fact]
@@ -325,6 +388,125 @@ public class RoutingChatClientTests
         Assert.Same(good, response);
         Assert.Equal("b", response.AdditionalProperties![RoutingChatClient.SelectedModelNameKey]);
         Assert.False(aCalled);
+    }
+
+    [Fact]
+    public async Task AttemptEvents_RecordFallbackThenSuccess()
+    {
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("boom") };
+        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models));
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("primary", modelId: "p", providerName: "prov", client: failing), new RoutingChatModel("fallback", client: working)],
+            selector);
+
+        using var capture = new AttemptEventCapture();
+        using (capture.StartTurn())
+        {
+            _ = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+        }
+
+        Assert.Equal(2, capture.Events.Count);
+
+        ActivityEvent first = capture.Events[0];
+        Assert.Equal(RoutingChatClient.AttemptEventName, first.Name);
+        Assert.Equal(1, GetTag(first, "routing.attempt.ordinal"));
+        Assert.Equal("primary", GetTag(first, "routing.attempt.model"));
+        Assert.Equal("p", GetTag(first, "routing.attempt.model_id"));
+        Assert.Equal("prov", GetTag(first, "routing.attempt.provider"));
+        Assert.Equal("fallback", GetTag(first, "routing.attempt.outcome"));
+        Assert.Equal(typeof(InvalidOperationException).FullName, GetTag(first, "routing.attempt.error_type"));
+
+        ActivityEvent second = capture.Events[1];
+        Assert.Equal(2, GetTag(second, "routing.attempt.ordinal"));
+        Assert.Equal("fallback", GetTag(second, "routing.attempt.model"));
+        Assert.Equal("success", GetTag(second, "routing.attempt.outcome"));
+        Assert.Null(GetTag(second, "routing.attempt.error_type"));
+    }
+
+    [Fact]
+    public async Task AttemptEvents_RecordErrorWhenChainExhausted()
+    {
+        using var failing1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("a") };
+        using var failing2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("b") };
+
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models));
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("a", client: failing1), new RoutingChatModel("b", client: failing2)],
+            selector);
+
+        using var capture = new AttemptEventCapture();
+        using (capture.StartTurn())
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetResponseAsync([new(ChatRole.User, "hi")]));
+        }
+
+        Assert.Equal(2, capture.Events.Count);
+        Assert.Equal("fallback", GetTag(capture.Events[0], "routing.attempt.outcome"));
+        Assert.Equal("error", GetTag(capture.Events[1], "routing.attempt.outcome"));
+        Assert.Equal(typeof(InvalidOperationException).FullName, GetTag(capture.Events[1], "routing.attempt.error_type"));
+    }
+
+    [Fact]
+    public async Task AttemptEvents_SingleSuccess_RecordsOneEvent()
+    {
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+
+        using var client = new RoutingChatClient([new RoutingChatModel("only", client: working)]);
+
+        using var capture = new AttemptEventCapture();
+        using (capture.StartTurn())
+        {
+            _ = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+        }
+
+        ActivityEvent only = Assert.Single(capture.Events);
+        Assert.Equal("only", GetTag(only, "routing.attempt.model"));
+        Assert.Equal("success", GetTag(only, "routing.attempt.outcome"));
+        Assert.NotNull(GetTag(only, "routing.attempt.duration_ms"));
+    }
+
+    [Fact]
+    public async Task AttemptEvents_Streaming_RecordsFallbackThenFirstTokenSuccess()
+    {
+        using var failing = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => ThrowingStream() };
+        using var working = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("ok") };
+
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models));
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("primary", client: failing), new RoutingChatModel("fallback", client: working)],
+            selector);
+
+        using var capture = new AttemptEventCapture();
+        using (capture.StartTurn())
+        {
+            await foreach (ChatResponseUpdate _ in client.GetStreamingResponseAsync([new(ChatRole.User, "hi")]))
+            {
+                // drain
+            }
+        }
+
+        Assert.Equal(2, capture.Events.Count);
+        Assert.Equal("fallback", GetTag(capture.Events[0], "routing.attempt.outcome"));
+        Assert.Equal("success", GetTag(capture.Events[1], "routing.attempt.outcome"));
+        Assert.Equal("fallback", GetTag(capture.Events[1], "routing.attempt.model"));
+    }
+
+    [Fact]
+    public async Task AttemptEvents_NotEmitted_WhenNoListenerRecording()
+    {
+        // No ActivityListener is registered, so Activity.Current is null and the router must skip the events
+        // entirely (and not throw) — telemetry cost is only paid when something is collecting it.
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+        using var client = new RoutingChatClient([new RoutingChatModel("only", client: working)]);
+
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Same(good, response);
     }
 
     [Fact]
@@ -742,6 +924,190 @@ public class RoutingChatClientTests
         Assert.Equal("beta", plan.OrderedModels[0].Name);
     }
 
+    private const string ReasoningPrompt = "Let's think step by step and reason through this; analyze this carefully.";
+
+    [Fact]
+    public async Task ComplexitySelector_EscalationRatchet_RoutesUpButNeverFlapsDown()
+    {
+        var simpleResp = new ChatResponse(new ChatMessage(ChatRole.Assistant, "simple"));
+        var hardResp = new ChatResponse(new ChatMessage(ChatRole.Assistant, "hard"));
+
+        using var simpleClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(simpleResp) };
+        using var hardClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(hardResp) };
+
+        var selector = new ComplexityChatRouteSelector(
+            new Dictionary<ChatComplexityTier, string>
+            {
+                [ChatComplexityTier.Simple] = "simple",
+                [ChatComplexityTier.Reasoning] = "hard",
+            },
+            defaultModel: "simple",
+            options: new ComplexityRouterOptions { EscalateOnComplexity = true });
+
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("simple", client: simpleClient), new RoutingChatModel("hard", client: hardClient)],
+            selector,
+            RoutingStickiness.ByConversation);
+
+        ChatResponse t1 = await client.GetResponseAsync([new(ChatRole.User, "hi")], WithConversationKey("c"));
+        ChatResponse t2 = await client.GetResponseAsync([new(ChatRole.User, "thanks")], WithConversationKey("c"));
+        ChatResponse t3 = await client.GetResponseAsync([new(ChatRole.User, ReasoningPrompt)], WithConversationKey("c"));
+        ChatResponse t4 = await client.GetResponseAsync([new(ChatRole.User, "hi")], WithConversationKey("c"));
+
+        Assert.Same(simpleResp, t1); // Simple -> simple model
+        Assert.Same(simpleResp, t2); // still Simple -> sticky reuse
+        Assert.Same(hardResp, t3);   // escalates to Reasoning -> re-routes up
+        Assert.Same(hardResp, t4);   // back to Simple, but the ratchet does not flap back down
+    }
+
+    [Fact]
+    public async Task ComplexitySelector_WithoutEscalation_StaysFrozenForConversation()
+    {
+        var simpleResp = new ChatResponse(new ChatMessage(ChatRole.Assistant, "simple"));
+        var hardResp = new ChatResponse(new ChatMessage(ChatRole.Assistant, "hard"));
+
+        using var simpleClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(simpleResp) };
+        using var hardClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(hardResp) };
+
+        var selector = new ComplexityChatRouteSelector(
+            new Dictionary<ChatComplexityTier, string>
+            {
+                [ChatComplexityTier.Simple] = "simple",
+                [ChatComplexityTier.Reasoning] = "hard",
+            },
+            defaultModel: "simple");
+
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("simple", client: simpleClient), new RoutingChatModel("hard", client: hardClient)],
+            selector,
+            RoutingStickiness.ByConversation);
+
+        ChatResponse t1 = await client.GetResponseAsync([new(ChatRole.User, "hi")], WithConversationKey("c"));
+        ChatResponse t2 = await client.GetResponseAsync([new(ChatRole.User, ReasoningPrompt)], WithConversationKey("c"));
+
+        // Escalation is off (the default), so the first decision is truly frozen for the conversation.
+        Assert.Same(simpleResp, t1);
+        Assert.Same(simpleResp, t2);
+    }
+
+    [Fact]
+    public async Task SemanticSelector_ConfidenceFloor_ReselectsWhenPinnedModelDrifts()
+    {
+        var aResp = new ChatResponse(new ChatMessage(ChatRole.Assistant, "a"));
+        var bResp = new ChatResponse(new ChatMessage(ChatRole.Assistant, "b"));
+
+        using var aClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(aResp) };
+        using var bClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(bResp) };
+
+        using var embedder = VectorEmbeddingGenerator(ConfidenceFloorVectors());
+        var profiles = new Dictionary<string, IReadOnlyList<string>> { ["a"] = ["a-utt"], ["b"] = ["b-utt"] };
+        var selector = new SemanticChatRouteSelector(
+            embedder, profiles, options: new SemanticRouterOptions { ReselectBelowThreshold = true });
+
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("a", client: aClient), new RoutingChatModel("b", client: bClient)],
+            selector,
+            RoutingStickiness.ByConversation);
+
+        ChatResponse t1 = await client.GetResponseAsync([new(ChatRole.User, "q-strong")], WithConversationKey("c"));
+        ChatResponse t2 = await client.GetResponseAsync([new(ChatRole.User, "q-stay")], WithConversationKey("c"));
+        ChatResponse t3 = await client.GetResponseAsync([new(ChatRole.User, "q-drift")], WithConversationKey("c"));
+
+        Assert.Same(aResp, t1); // strong match to a
+        Assert.Same(aResp, t2); // a still above its floor -> sticky reuse
+        Assert.Same(bResp, t3); // a falls below its floor -> re-routes to b
+    }
+
+    [Fact]
+    public async Task SemanticSelector_WithoutReselect_StaysFrozenForConversation()
+    {
+        var aResp = new ChatResponse(new ChatMessage(ChatRole.Assistant, "a"));
+        var bResp = new ChatResponse(new ChatMessage(ChatRole.Assistant, "b"));
+
+        using var aClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(aResp) };
+        using var bClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(bResp) };
+
+        using var embedder = VectorEmbeddingGenerator(ConfidenceFloorVectors());
+        var profiles = new Dictionary<string, IReadOnlyList<string>> { ["a"] = ["a-utt"], ["b"] = ["b-utt"] };
+        var selector = new SemanticChatRouteSelector(embedder, profiles);
+
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("a", client: aClient), new RoutingChatModel("b", client: bClient)],
+            selector,
+            RoutingStickiness.ByConversation);
+
+        ChatResponse t1 = await client.GetResponseAsync([new(ChatRole.User, "q-strong")], WithConversationKey("c"));
+        ChatResponse t2 = await client.GetResponseAsync([new(ChatRole.User, "q-drift")], WithConversationKey("c"));
+
+        // Reselection is off (the default), so even a drifting query keeps the frozen decision.
+        Assert.Same(aResp, t1);
+        Assert.Same(aResp, t2);
+    }
+
+    [Fact]
+    public async Task DecisionEvent_RecordsComplexityTierAndConversationKey()
+    {
+        using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))) };
+        var selector = new ComplexityChatRouteSelector(
+            new Dictionary<ChatComplexityTier, string> { [ChatComplexityTier.Reasoning] = "m" },
+            defaultModel: "m");
+
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("m", modelId: "prov/m", client: inner)],
+            selector,
+            RoutingStickiness.ByConversation);
+
+        using var capture = new AttemptEventCapture();
+        using (capture.StartTurn())
+        {
+            _ = await client.GetResponseAsync([new(ChatRole.User, ReasoningPrompt)], WithConversationKey("conv-7"));
+        }
+
+        ActivityEvent decision = Assert.Single(capture.DecisionEvents);
+        Assert.Equal("m", GetTag(decision, "routing.selected_model"));
+        Assert.Equal("Reasoning", GetTag(decision, "routing.complexity.tier"));
+        Assert.Equal("conv-7", GetTag(decision, "routing.conversation_key"));
+    }
+
+    [Fact]
+    public async Task DecisionEvent_RecordsSemanticScore()
+    {
+        using var aClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))) };
+        using var bClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))) };
+
+        var vectors = new Dictionary<string, float[]> { ["a-utt"] = [1f, 0f], ["b-utt"] = [0f, 1f], ["q"] = [1f, 0f] };
+        using var embedder = VectorEmbeddingGenerator(vectors);
+        var profiles = new Dictionary<string, IReadOnlyList<string>> { ["a"] = ["a-utt"], ["b"] = ["b-utt"] };
+        var selector = new SemanticChatRouteSelector(embedder, profiles);
+
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("a", client: aClient), new RoutingChatModel("b", client: bClient)],
+            selector);
+
+        using var capture = new AttemptEventCapture();
+        using (capture.StartTurn())
+        {
+            _ = await client.GetResponseAsync([new(ChatRole.User, "q")]);
+        }
+
+        ActivityEvent decision = Assert.Single(capture.DecisionEvents);
+        Assert.Equal("a", GetTag(decision, "routing.selected_model"));
+        Assert.Equal(1.0, Assert.IsType<double>(GetTag(decision, "routing.semantic.score")), 3);
+        Assert.Null(GetTag(decision, "routing.conversation_key"));
+    }
+
+    // Query vectors for the confidence-floor tests, encoding cosine similarity against a=[1,0] and b=[0,1]:
+    // q-strong matches a (1.00); q-stay still meets a's 0.3 floor (0.90); q-drift falls below it (0.10) while
+    // matching b (0.995), so a re-selection moves to b.
+    private static Dictionary<string, float[]> ConfidenceFloorVectors() => new()
+    {
+        ["a-utt"] = [1f, 0f],
+        ["b-utt"] = [0f, 1f],
+        ["q-strong"] = [1f, 0f],
+        ["q-stay"] = [0.9f, 0.43589f],
+        ["q-drift"] = [0.1f, 0.99499f],
+    };
+
     private static TestEmbeddingGenerator KeywordEmbeddingGenerator() => new()
     {
         GenerateAsyncCallback = (values, _, _) =>
@@ -822,6 +1188,52 @@ public class RoutingChatClientTests
         }
 
         throw new InvalidOperationException("boom");
+    }
+
+    private static object? GetTag(ActivityEvent evt, string key) =>
+        evt.Tags.FirstOrDefault(t => t.Key == key).Value;
+
+    private static ChatOptions WithConversationKey(string key) =>
+        new() { AdditionalProperties = new() { [RoutingChatClient.ConversationKeyPropertyName] = key } };
+
+    private sealed class ForwardedOptionsProbe
+    {
+        public bool Invoked { get; set; }
+        public bool HadConversationKey { get; set; }
+    }
+
+    // Registers an ActivitySource + listener, starts a recording "turn" activity, and collects the
+    // routing.attempt events the router adds to it. Mirrors how a real OpenTelemetry consumer would observe them.
+    private sealed class AttemptEventCapture : IDisposable
+    {
+        private readonly ActivitySource _source = new("RoutingChatClientTests-" + Guid.NewGuid().ToString("N"));
+        private readonly ActivityListener _listener;
+        private Activity? _turn;
+
+        public AttemptEventCapture()
+        {
+            _listener = new ActivityListener
+            {
+                ShouldListenTo = s => s == _source,
+                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            };
+            ActivitySource.AddActivityListener(_listener);
+        }
+
+        public IReadOnlyList<ActivityEvent> Events =>
+            _turn?.Events.Where(e => e.Name == RoutingChatClient.AttemptEventName).ToList() ?? [];
+
+        public IReadOnlyList<ActivityEvent> DecisionEvents =>
+            _turn?.Events.Where(e => e.Name == RoutingChatClient.DecisionEventName).ToList() ?? [];
+
+        public IDisposable StartTurn() => _turn = _source.StartActivity("turn")!;
+
+        public void Dispose()
+        {
+            _turn?.Dispose();
+            _listener.Dispose();
+            _source.Dispose();
+        }
     }
 
     private sealed class CountingDisposeClient : IChatClient
