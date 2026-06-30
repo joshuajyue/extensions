@@ -14,8 +14,10 @@ namespace Microsoft.Extensions.AI;
 
 /// <summary>Represents the decision produced by an <see cref="IChatRouteSelector"/>.</summary>
 /// <remarks>
-/// A plan is an ordered list of models: the first is the primary, and any remaining models are
-/// fallbacks tried in order if an attempt fails. The optional <see cref="RemainsValid"/> predicate
+/// A plan is the ordered list of models the selector prefers: the first is the primary, and any remaining
+/// models are fallbacks the router tries in order if an attempt fails. A selector that naturally picks a
+/// single model may return a one-model plan and leave fallback to the router (see
+/// <see cref="RoutingChatClientBuilder.UseFallback()"/>). The optional <see cref="RemainsValid"/> predicate
 /// lets the selector author its own invalidation rule for cached decisions (see
 /// <see cref="RoutingStickiness"/>); when it returns <see langword="false"/>, the router re-runs the
 /// selector even when a sticky decision is cached.

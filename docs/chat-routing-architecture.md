@@ -42,7 +42,7 @@ The folder divides cleanly into three groups:
 | Group | Files |
 |---|---|
 | **Mechanism** | `RoutingChatClient`, `RoutingChatClientBuilder`, `RoutingStickiness`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
-| **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan`, `ChatRouteAttempt` |
+| **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan` |
 | **Shipped policies & adapters** | `RuleBasedChatRouteSelector`, `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `ChatModelCatalog` (+ `ChatModelCatalogOptions`) |
 
 ---
@@ -104,8 +104,6 @@ The read-only bundle the mechanism hands to every selector call:
   why "chat options as routing metadata" matters: selectors read these optional fields as routing
   signals.
 - **`Models`** — the registered candidate `RoutingChatModel`s you may pick from.
-- **`PreviousAttempt`** — a `ChatRouteAttempt?`, `null` on the initial selection. The hook for
-  failure-adaptive policies (see below).
 
 It validates `messages`/`models` non-null in the constructor and is otherwise an immutable
 data carrier. When a selector parameter is named `ctx`/`context` in examples, *this* is the type.
@@ -115,10 +113,13 @@ data carrier. When a selector parameter is named `ctx`/`context` in examples, *t
 A selector does **not** return "the one model." It returns a `ChatRoutePlan`, which encodes two
 things a bare `RoutingChatModel` cannot:
 
-1. **An ordered fallback chain.** `OrderedModels` is primary-first; the rest are fallbacks tried in
-   order on failure. If the contract returned a single model, fallback would have to become a
-   *mechanism* opinion — violating the mechanism-is-opinion-free rule. The plan is how the **policy**
-   owns the fallback order.
+1. **An ordered preference chain.** `OrderedModels` is primary-first; the rest are fallbacks the
+   router tries in order on failure. A selector with a genuine ranking (the semantic router orders
+   by descending similarity) emits a multi-model plan whose tail *is* a meaningful fallback chain.
+   A selector that naturally picks one model (a complexity classifier maps a request to exactly one
+   tier/model) returns a **one-model plan** and leaves the rest to the router's fallback policy —
+   it has no honest ranking of the other models to fabricate. There is a single-model convenience
+   constructor for exactly this case.
 2. **A self-invalidation rule.** The optional `RemainsValid` predicate
    (`Func<ChatRouteContext, CancellationToken, ValueTask<bool>>`) lets a *cached* sticky decision
    decide it is stale. This is the policy-side complement to `RoutingStickiness` (the mechanism-side
@@ -126,33 +127,23 @@ things a bare `RoutingChatModel` cannot:
    jumped." A static return value has nowhere to hang that rule.
 
 Construction validates a non-empty, non-null model list and defensively copies it into a
-`ReadOnlyCollection`. There's a single-model convenience constructor for the common case.
+`ReadOnlyCollection`.
 
-**Plan vs. PreviousAttempt — proactive vs. reactive fallback.** These are not two ways to do the same
-thing; they are two *timings*:
+### Fallback: plan tail (policy) + router fallback policy (mechanism)
 
-- `ChatRoutePlan` decides the **whole fallback chain up front, failure-blind**. The selector runs
-  once and never learns *how* a model failed. Use it when the preference order is known in advance
-  ("smart → cheap → local, retry on any error").
-- `PreviousAttempt` decides **one model at a time, reacting to how the last attempt failed** (status
-  code, exception type). Use it for circuit breakers, error-type branching, or cost-aware escalation
-  ("only pay for the expensive model *if* the cheap one actually refused"). A plan can't express
-  "if it's a 429 go here, if it's a content filter go there," because the list is fixed before any
-  exception exists.
+Fallback is split across the same mechanism/policy line as selection:
 
-### `ChatRouteAttempt.cs` — the reactive hook (reserved)
-
-A record of **one try**: the `Model`, the 1-based `AttemptNumber`, and the `Exception` (if it
-failed). It is surfaced to the policy through `ChatRouteContext.PreviousAttempt` so an adaptive
-selector can react to a specific failure.
-
-**Honest status:** this is a *plumbed-but-not-yet-driven* extension point. The mechanism's current
-fallback loop walks `plan.OrderedModels` in place and always builds the context with
-`previousAttempt = null` — it never re-invokes the selector mid-request with a populated
-`PreviousAttempt`. The type and the context property are public and stable, but no shipped code feeds
-them yet. They exist as the seam for a future milestone: re-running selection on model
-failure/unavailability (the "circuit breaking / fallback on unavailable model" idea). Shipping the
-seam now means that milestone won't be a breaking API change.
+- **The plan tail is policy.** When a selector *has* a real ranking, it expresses fallback by
+  returning more than one model. The mechanism never reorders the plan; it just walks it.
+- **The fallback policy is mechanism.** A one-model plan has no tail, so to give single-model
+  selectors resilience the **router** owns an optional fallback policy, configured with
+  `RoutingChatClientBuilder.UseFallback()`. After the plan's models are exhausted, the policy
+  receives the route context and the registered models the plan omitted, and returns the order in
+  which to try them. The parameterless overload uses registration order (zero opinion about
+  fitness — it's literally the order you registered); the delegate overload lets the consumer order
+  the tail (for example cheapest-first). When no policy is configured, the router only attempts the
+  plan's models. This keeps the mechanism opinion-free by default while letting a complexity
+  classifier stay out of the fallback business entirely.
 
 ---
 
@@ -175,14 +166,17 @@ The heart of the feature, and an `IChatClient` itself. Responsibilities, in orde
 3. **Run the selector** (`RunSelectorAsync`) — or, when no selector was supplied, the opinion-free
    `DefaultSelectRoute`: honor `ChatOptions.ModelId` (matched against each model's `ModelId` or
    `Name`), otherwise the first registered model.
-4. **Invoke with fallback** — walk `plan.OrderedModels`; call `GetResponseAsync` on each model's
-   `Client`. On exception, the `catch ... when (i < ordered.Count - 1 && !ct.IsCancellationRequested)`
+4. **Build the attempt order** (`BuildAttemptOrder`) — start with `plan.OrderedModels`; if a fallback
+   policy was configured (`UseFallback`), append the registered models the plan omitted, in the order
+   the policy returns, de-duped so each candidate is tried at most once.
+5. **Invoke with fallback** — walk that attempt order; call `GetResponseAsync` on each model's
+   `Client`. On exception, the `catch ... when (i < ordered.Length - 1 && !ct.IsCancellationRequested)`
    guard falls through to the next model; the final model's exception propagates. Cancellation is
    never swallowed.
-5. **Forward options carefully** (`CreateForwardedOptions`): the chosen model's provider `ModelId` is
+6. **Forward options carefully** (`CreateForwardedOptions`): the chosen model's provider `ModelId` is
    injected **only** when the caller didn't already pin one, by cloning the options. Routing internals
    are **never** written into the forwarded request — the inner client sees a clean request.
-6. **Stamp the result** (`StampResponse`): write the selected model's name/id/provider into the
+7. **Stamp the result** (`StampResponse`): write the selected model's name/id/provider into the
    response's `AdditionalProperties` (keys `routing.selected_model`, `routing.selected_model_id`,
    `routing.selected_provider`) and tag the current `Activity` for telemetry.
 
@@ -344,8 +338,10 @@ precompiles the multi-step patterns into `Regex[]` (case-insensitive, culture-in
 - With **no user message**, faithfully prefers the explicit `defaultModel`, else the `Medium`-tier
   model (there's nothing to score).
 - Otherwise calls `Classify`, maps the tier to a model name (falling back to `defaultModel` for an
-  unmapped tier), and returns a plan with that model primary and the rest as fallbacks in registration
-  order (`OrderModels`).
+  unmapped tier, and to the first registered model when the mapped name is not registered), and
+  returns a **single-model plan** for that model (`SelectTarget`). A tier classifier picks exactly one
+  model and has no meaningful ranking of the others, so it leaves fallback to the router's
+  `UseFallback` policy.
 
 `Classify` computes LiteLLM's exact weighted sum across the seven dimensions, applies the
 "2+ distinct reasoning markers ⇒ `Reasoning`" override, then maps the score against the three
@@ -423,8 +419,8 @@ each mechanism guarantee:
 Validates the faithful scoring and the routing wrapper: constructor rejects null/empty tier maps;
 `ClassifyTier` classifies a greeting as `Simple`, forces `Reasoning` on two reasoning markers, and
 rates a code+technical prompt as `Complex`; `SelectRouteAsync` routes to the tier-mapped model, falls
-back to the default model for an unmapped tier, and preserves registration order when the target model
-isn't present; and custom keyword lists change the classification (proving the options are honored).
+back to the default model for an unmapped tier, and falls back to the first registered model when the
+target model isn't present; and custom keyword lists change the classification (proving the options are honored).
 
 ### `ChatModelCatalogTests.cs` — the catalog adapter
 
@@ -449,5 +445,5 @@ and stream parity; and rejects a non-array root. A final cross-catalog test prov
 you composition (nesting + middleware), fallback, stickiness, and response stamping for free;
 `IChatRouteSelector` supplies the judgment — whether that's the empty default, one of the shipped
 experimental selectors, or your own lambda. `ChatRoutePlan` exists because a routing decision is
-*ordered fallbacks + an invalidation rule*, not a single model; `ChatRouteAttempt`/`PreviousAttempt`
-are the reserved seam for future failure-adaptive policies.
+*ordered preference + an invalidation rule*, not just a single model; and when a selector picks one
+model, the router's own `UseFallback` policy owns the order in which the remaining models are tried.

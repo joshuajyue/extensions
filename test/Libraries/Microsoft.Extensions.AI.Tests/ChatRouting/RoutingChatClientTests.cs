@@ -237,6 +237,97 @@ public class RoutingChatClientTests
     }
 
     [Fact]
+    public async Task Fallback_DisabledByDefault_SingleModelPlanDoesNotTryOtherModels()
+    {
+        using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("primary") };
+        bool otherCalled = false;
+        using var other = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, _, _) =>
+            {
+                otherCalled = true;
+                return Task.FromResult(new ChatResponse());
+            },
+        };
+
+        // The selector picks a single model and no router fallback is configured, so the failure surfaces.
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models[0]));
+
+        using var client = new RoutingChatClient(
+            [new RoutingChatModel("primary", client: failing), new RoutingChatModel("other", client: other)],
+            selector);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.GetResponseAsync([new(ChatRole.User, "hi")]));
+
+        Assert.Equal("primary", ex.Message);
+        Assert.False(otherCalled);
+    }
+
+    [Fact]
+    public async Task Fallback_RouterOwnedPolicy_TriesRemainingModelsInRegistrationOrder()
+    {
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("boom") };
+        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+
+        // The selector picks a single model; the router owns fallback over the remaining models.
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models[0]));
+
+        using RoutingChatClient client = new RoutingChatClientBuilder()
+            .AddModel("primary", failing)
+            .AddModel("fallback", working)
+            .UseSelector(selector)
+            .UseFallback()
+            .Build();
+
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Same(good, response);
+        Assert.Equal("fallback", response.AdditionalProperties![RoutingChatClient.SelectedModelNameKey]);
+    }
+
+    [Fact]
+    public async Task Fallback_CustomPolicy_ControlsTailOrder()
+    {
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("primary") };
+        bool aCalled = false;
+        using var a = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, _, _) =>
+            {
+                aCalled = true;
+                throw new InvalidOperationException("a");
+            },
+        };
+        using var b = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models[0]));
+
+        using var client = new RoutingChatClient(
+            [
+                new RoutingChatModel("primary", client: failing),
+                new RoutingChatModel("a", client: a),
+                new RoutingChatModel("b", client: b),
+            ],
+            selector,
+            fallback: (_, remaining) =>
+            {
+                // Reverse registration order so "b" is tried before "a".
+                var reversed = new List<RoutingChatModel>(remaining);
+                reversed.Reverse();
+                return reversed;
+            });
+
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Same(good, response);
+        Assert.Equal("b", response.AdditionalProperties![RoutingChatClient.SelectedModelNameKey]);
+        Assert.False(aCalled);
+    }
+
+    [Fact]
     public async Task SelectorRoutingToUnregisteredModel_Throws()
     {
         using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };

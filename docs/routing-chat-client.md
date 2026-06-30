@@ -288,10 +288,12 @@ var selector = new ComplexityChatRouteSelector(tierMap, options: options);
 ```
 
 `ClassifyTier(messages)` is public if you want the tier without routing. Because complexity
-routing is just another selector, it composes with the rest of the mechanism: fallback, response
-stamping, stickiness, and nesting all apply unchanged. (It does **not** apply the
-`RuleBasedChatRouteSelector` context-window hard-filter — pair it with capacity-aware tier
-mappings if a tier's model has a small context window.)
+routing is just another selector, it composes with the rest of the mechanism: response stamping,
+stickiness, and nesting all apply unchanged. Since a tier classifier picks exactly one model, its
+plan is a **single model** — to get fallback, pair it with the router's `UseFallback()` policy (see
+[Fallback](#fallback-circuit-breaking) above), which owns the order in which the other models are
+tried. (It also does **not** apply the `RuleBasedChatRouteSelector` context-window hard-filter —
+pair it with capacity-aware tier mappings if a tier's model has a small context window.)
 
 ## Model metadata and currency
 
@@ -343,11 +345,33 @@ soft ranking to policy.
 
 ## Fallback (circuit breaking)
 
-The router walks `ChatRoutePlan.OrderedModels`: if the primary throws, it tries the next, and
-so on. The exception of the **last** model propagates. The model that ultimately succeeds is
-the one stamped on the response. `ChatRouteContext.PreviousAttempt` and `ChatRouteAttempt`
-exist so an advanced selector can implement adaptive behavior (for example, circuit breaking);
-the default behavior simply walks the static plan.
+Fallback is split across the mechanism/policy line, mirroring selection itself:
+
+- **The plan (selector).** A selector returns a `ChatRoutePlan` of the models it prefers, primary
+  first. The router walks `ChatRoutePlan.OrderedModels`: if the primary throws, it tries the next,
+  and so on. A selector with a genuine ranking (such as the semantic router, which orders by
+  descending similarity) emits a multi-model plan whose tail *is* a meaningful fallback chain.
+- **The fallback policy (router).** A selector that naturally picks a single model — a complexity
+  classifier maps each request to exactly one tier/model — has no honest ranking of the *other*
+  models to offer, so it returns a one-model plan. To give such a selector resilience, configure a
+  fallback policy on the router with `RoutingChatClientBuilder.UseFallback()`. After the plan's
+  models are exhausted, the policy decides the order in which the remaining registered models are
+  tried. The parameterless overload uses registration order; the delegate overload
+  (`UseFallback((context, remaining) => ...)`) lets you order the tail however you like (for
+  example, cheapest-first). When no fallback policy is set, the router only attempts the plan's
+  models.
+
+The exception of the **last** attempted model propagates. The model that ultimately succeeds is
+the one stamped on the response.
+
+```csharp
+RoutingChatClient client = new RoutingChatClientBuilder()
+    .AddModel("fast", fastClient)
+    .AddModel("smart", smartClient)
+    .UseSelector(new ComplexityChatRouteSelector(tierMap)) // picks one model
+    .UseFallback()                                         // router tries the rest in registration order
+    .Build();
+```
 
 **Streaming caveat:** fallback applies only *before the first update is yielded*. Once a
 streaming response has started, no fallback occurs.

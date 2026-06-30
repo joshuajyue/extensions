@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,8 +29,10 @@ namespace Microsoft.Extensions.AI;
 /// <para>
 /// The tier-to-model mapping is supplied explicitly at construction (keyed by the model's
 /// <see cref="RoutingChatModel.Name"/>). When a tier has no mapping, the optional default model is
-/// used; the selected model is the primary route and the remaining models are fallbacks in
-/// registration order. Tune the scoring with <see cref="ComplexityRouterOptions"/>.
+/// used. A complexity classifier picks exactly one model, so the produced <see cref="ChatRoutePlan"/>
+/// contains just that model: it has no meaningful ranking of the other models to offer as fallbacks.
+/// Configure fallback on the router instead (see <see cref="RoutingChatClientBuilder.UseFallback()"/>),
+/// which owns failure handling. Tune the scoring with <see cref="ComplexityRouterOptions"/>.
 /// </para>
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
@@ -88,7 +91,7 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
             Throw.ArgumentException(nameof(modelByTier), "At least one tier-to-model mapping must be provided.");
         }
 
-        _modelByTier = new Dictionary<ChatComplexityTier, string>(modelByTier);
+        _modelByTier = modelByTier.ToDictionary(static pair => pair.Key, static pair => pair.Value);
         _defaultModel = defaultModel;
         _options = options ?? new ComplexityRouterOptions();
 
@@ -121,8 +124,8 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
             targetName = _modelByTier.TryGetValue(tier, out string? mapped) ? mapped : _defaultModel;
         }
 
-        RoutingChatModel[] ordered = OrderModels(ctx.Models, targetName);
-        return new ValueTask<ChatRoutePlan>(new ChatRoutePlan(ordered));
+        RoutingChatModel target = SelectTarget(ctx.Models, targetName);
+        return new ValueTask<ChatRoutePlan>(new ChatRoutePlan(target));
     }
 
     /// <summary>Classifies the request into a complexity tier using the configured rule-based scoring.</summary>
@@ -306,42 +309,24 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
 
         return (userText, systemText);
     }
-    private static RoutingChatModel[] OrderModels(IReadOnlyList<RoutingChatModel> models, string? primaryName)
+
+    // Complexity classifies a request into exactly one tier, so the plan is a single model: the one mapped
+    // to that tier. When the mapping is absent or names a model that is not registered, the first registered
+    // model is used as a deterministic, opinion-free default. The router owns any fallback (see UseFallback),
+    // because a tier classifier has no meaningful ranking of the other models to offer.
+    private static RoutingChatModel SelectTarget(IReadOnlyList<RoutingChatModel> models, string? targetName)
     {
-        int primaryIndex = -1;
-        if (primaryName is not null)
+        if (targetName is not null)
         {
-            for (int i = 0; i < models.Count; i++)
+            foreach (RoutingChatModel model in models)
             {
-                if (string.Equals(models[i].Name, primaryName, StringComparison.Ordinal))
+                if (string.Equals(model.Name, targetName, StringComparison.Ordinal))
                 {
-                    primaryIndex = i;
-                    break;
+                    return model;
                 }
             }
         }
 
-        var ordered = new RoutingChatModel[models.Count];
-        if (primaryIndex < 0)
-        {
-            for (int i = 0; i < models.Count; i++)
-            {
-                ordered[i] = models[i];
-            }
-
-            return ordered;
-        }
-
-        ordered[0] = models[primaryIndex];
-        int write = 1;
-        for (int i = 0; i < models.Count; i++)
-        {
-            if (i != primaryIndex)
-            {
-                ordered[write++] = models[i];
-            }
-        }
-
-        return ordered;
+        return models[0];
     }
 }

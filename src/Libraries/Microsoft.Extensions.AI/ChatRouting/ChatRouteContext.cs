@@ -16,17 +16,14 @@ public sealed class ChatRouteContext
     /// <param name="messages">The chat messages being routed.</param>
     /// <param name="options">The chat options for the request, if any.</param>
     /// <param name="models">The models available to route to.</param>
-    /// <param name="previousAttempt">The previous failed attempt, if the selector is being re-invoked after a failure.</param>
     public ChatRouteContext(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options,
-        IReadOnlyList<RoutingChatModel> models,
-        ChatRouteAttempt? previousAttempt = null)
+        IReadOnlyList<RoutingChatModel> models)
     {
         Messages = Throw.IfNull(messages);
         Options = options;
         Models = Throw.IfNull(models);
-        PreviousAttempt = previousAttempt;
     }
 
     /// <summary>Gets the chat messages being routed.</summary>
@@ -37,12 +34,4 @@ public sealed class ChatRouteContext
 
     /// <summary>Gets the models available to route to.</summary>
     public IReadOnlyList<RoutingChatModel> Models { get; }
-
-    /// <summary>Gets the previous failed attempt, if the selector is being re-invoked after a failure.</summary>
-    /// <remarks>
-    /// This is <see langword="null"/> on the initial selection. The built-in fallback walks the
-    /// ordered models of the produced plan; advanced selectors may inspect this to implement
-    /// adaptive behavior such as circuit breaking.
-    /// </remarks>
-    public ChatRouteAttempt? PreviousAttempt { get; }
 }

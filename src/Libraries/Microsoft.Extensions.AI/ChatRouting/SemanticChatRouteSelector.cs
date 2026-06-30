@@ -106,7 +106,7 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         _scoreThreshold = options.ScoreThreshold;
         if (options.ScoreThresholdByModel is { Count: > 0 })
         {
-            _scoreThresholdByModel = new(options.ScoreThresholdByModel, StringComparer.OrdinalIgnoreCase);
+            _scoreThresholdByModel = options.ScoreThresholdByModel.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         }
     }
 

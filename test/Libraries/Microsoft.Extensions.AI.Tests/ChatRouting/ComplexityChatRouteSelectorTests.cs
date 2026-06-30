@@ -78,7 +78,7 @@ public class ComplexityChatRouteSelectorTests
         ChatRoutePlan plan = await selector.SelectRouteAsync(context);
 
         Assert.Equal("mini", plan.OrderedModels[0].Name);
-        Assert.Equal(_models.Length, plan.OrderedModels.Count);
+        Assert.Single(plan.OrderedModels);
     }
 
     [Fact]
@@ -94,7 +94,7 @@ public class ComplexityChatRouteSelectorTests
     }
 
     [Fact]
-    public async Task SelectRouteAsync_KeepsRegistrationOrder_WhenTargetMissing()
+    public async Task SelectRouteAsync_FallsBackToFirstModel_WhenTargetMissing()
     {
         var selector = new ComplexityChatRouteSelector(
             new Dictionary<ChatComplexityTier, string> { [ChatComplexityTier.Simple] = "absent" });
@@ -103,6 +103,7 @@ public class ComplexityChatRouteSelectorTests
         ChatRoutePlan plan = await selector.SelectRouteAsync(context);
 
         Assert.Equal("mini", plan.OrderedModels[0].Name);
+        Assert.Single(plan.OrderedModels);
     }
 
     [Fact]

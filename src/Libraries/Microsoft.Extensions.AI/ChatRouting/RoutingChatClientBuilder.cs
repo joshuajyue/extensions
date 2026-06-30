@@ -18,6 +18,7 @@ public sealed class RoutingChatClientBuilder
     private readonly List<RoutingChatModel> _models = [];
     private IChatRouteSelector? _selector;
     private RoutingStickiness _stickiness = RoutingStickiness.EveryCall;
+    private Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? _fallback;
 
     /// <summary>Initializes a new instance of the <see cref="RoutingChatClientBuilder"/> class.</summary>
     /// <param name="catalog">Optional catalog used by <see cref="AddFromCatalog(string, IChatClient)"/>.</param>
@@ -154,7 +155,31 @@ public sealed class RoutingChatClientBuilder
         return this;
     }
 
+    /// <summary>Enables fallback over the registered models a selector's plan omitted, in registration order.</summary>
+    /// <returns>The current builder.</returns>
+    /// <remarks>
+    /// After every model in the selected <see cref="ChatRoutePlan"/> has failed, the router tries the remaining
+    /// registered models in the order they were added. This gives resilience to selectors that deliberately pick
+    /// a single model (such as a complexity classifier) without the selector having to fabricate a ranking of the
+    /// other models. For a different fallback order, use <see cref="UseFallback(Func{ChatRouteContext, IReadOnlyList{RoutingChatModel}, IReadOnlyList{RoutingChatModel}})"/>.
+    /// </remarks>
+    public RoutingChatClientBuilder UseFallback() =>
+        UseFallback(static (_, remaining) => remaining);
+
+    /// <summary>Sets a custom fallback policy used after a selector's plan is exhausted.</summary>
+    /// <param name="fallback">
+    /// A delegate that receives the route context and the registered models not already in the plan, and returns
+    /// the order in which to try them. Returning an empty list disables fallback for that request.
+    /// </param>
+    /// <returns>The current builder.</returns>
+    public RoutingChatClientBuilder UseFallback(
+        Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>> fallback)
+    {
+        _fallback = Throw.IfNull(fallback);
+        return this;
+    }
+
     /// <summary>Builds a <see cref="RoutingChatClient"/>.</summary>
     /// <returns>A routing chat client.</returns>
-    public RoutingChatClient Build() => new(_models, _selector, _stickiness);
+    public RoutingChatClient Build() => new(_models, _selector, _stickiness, _fallback);
 }

@@ -32,6 +32,14 @@ namespace Microsoft.Extensions.AI;
 /// <see cref="ChatOptions.ModelId"/> when set, otherwise it uses the first registered model.
 /// </para>
 /// <para>
+/// A selector returns a <see cref="ChatRoutePlan"/> of the models it prefers, primary first. The router
+/// attempts those in order; if every model in the plan fails, an optional <em>fallback policy</em> (a
+/// delegate supplied via the constructor or <see cref="RoutingChatClientBuilder.UseFallback()"/>) decides
+/// the order in which any remaining registered models are tried. This lets a selector that naturally picks
+/// a single model (for example a complexity classifier) stay out of the fallback business: it returns just
+/// its primary, and the router owns failure handling.
+/// </para>
+/// <para>
 /// Because each candidate is itself an <see cref="IChatClient"/>, a routing pipeline forms a tree:
 /// a candidate may have its own middleware, or may itself be another <see cref="RoutingChatClient"/>.
 /// </para>
@@ -52,6 +60,7 @@ public class RoutingChatClient : IChatClient
     private readonly ReadOnlyCollection<RoutingChatModel> _modelList;
     private readonly IChatRouteSelector? _selector;
     private readonly RoutingStickiness _stickiness;
+    private readonly Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? _fallback;
 
     private readonly ConcurrentDictionary<string, ChatRoutePlan>? _planByConversationId;
     private ChatRoutePlan? _instancePlan;
@@ -60,10 +69,16 @@ public class RoutingChatClient : IChatClient
     /// <param name="models">The models to route between. At least one is required, each bound to an <see cref="IChatClient"/>.</param>
     /// <param name="selector">The selection policy, or <see langword="null"/> for the opinion-free default.</param>
     /// <param name="stickiness">How a routing decision is cached and reused across requests.</param>
+    /// <param name="fallback">
+    /// An optional fallback policy. After every model in the selected <see cref="ChatRoutePlan"/> has failed,
+    /// this delegate receives the route context and the registered models not already in the plan, and returns
+    /// the order in which to try them. When <see langword="null"/>, the router only attempts the plan's models.
+    /// </param>
     public RoutingChatClient(
         IReadOnlyList<RoutingChatModel> models,
         IChatRouteSelector? selector = null,
-        RoutingStickiness stickiness = RoutingStickiness.EveryCall)
+        RoutingStickiness stickiness = RoutingStickiness.EveryCall,
+        Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? fallback = null)
     {
         if (!Enum.IsDefined(typeof(RoutingStickiness), stickiness))
         {
@@ -74,6 +89,7 @@ public class RoutingChatClient : IChatClient
         _modelList = new ReadOnlyCollection<RoutingChatModel>(_models);
         _selector = selector;
         _stickiness = stickiness;
+        _fallback = fallback;
 
         if (stickiness == RoutingStickiness.ByConversationId)
         {
@@ -93,8 +109,8 @@ public class RoutingChatClient : IChatClient
         var context = new ChatRouteContext(normalizedMessages, options, _modelList);
         ChatRoutePlan plan = await GetPlanAsync(context, cancellationToken);
 
-        IReadOnlyList<RoutingChatModel> ordered = plan.OrderedModels;
-        for (int i = 0; i < ordered.Count; i++)
+        RoutingChatModel[] ordered = BuildAttemptOrder(plan, context);
+        for (int i = 0; i < ordered.Length; i++)
         {
             RoutingChatModel model = ValidateRoutedModel(ordered[i]);
             ChatOptions? forwarded = CreateForwardedOptions(model, options);
@@ -105,9 +121,9 @@ public class RoutingChatClient : IChatClient
                 StampResponse(response, model);
                 return response;
             }
-            catch (Exception) when (i < ordered.Count - 1 && !cancellationToken.IsCancellationRequested)
+            catch (Exception) when (i < ordered.Length - 1 && !cancellationToken.IsCancellationRequested)
             {
-                // Fall back to the next model in the plan.
+                // Fall back to the next model in the attempt order.
             }
         }
 
@@ -127,8 +143,8 @@ public class RoutingChatClient : IChatClient
         var context = new ChatRouteContext(normalizedMessages, options, _modelList);
         ChatRoutePlan plan = await GetPlanAsync(context, cancellationToken);
 
-        IReadOnlyList<RoutingChatModel> ordered = plan.OrderedModels;
-        for (int i = 0; i < ordered.Count; i++)
+        RoutingChatModel[] ordered = BuildAttemptOrder(plan, context);
+        for (int i = 0; i < ordered.Length; i++)
         {
             RoutingChatModel model = ValidateRoutedModel(ordered[i]);
             ChatOptions? forwarded = CreateForwardedOptions(model, options);
@@ -142,7 +158,7 @@ public class RoutingChatClient : IChatClient
                 // Fallback applies only until the first update is produced.
                 hasFirst = await enumerator.MoveNextAsync();
             }
-            catch (Exception) when (i < ordered.Count - 1 && !cancellationToken.IsCancellationRequested)
+            catch (Exception) when (i < ordered.Length - 1 && !cancellationToken.IsCancellationRequested)
             {
                 await enumerator.DisposeAsync();
                 continue;
@@ -263,6 +279,57 @@ public class RoutingChatClient : IChatClient
         _selector is null
             ? new ValueTask<ChatRoutePlan>(DefaultSelectRoute(context))
             : _selector.SelectRouteAsync(context, cancellationToken);
+
+    // Builds the ordered sequence the router actually attempts: the selected plan's models first, then —
+    // if a fallback policy is configured — the registered models the plan omitted, in the order the policy
+    // returns. Duplicates and models already in the plan are dropped so each candidate is tried at most once.
+    private RoutingChatModel[] BuildAttemptOrder(ChatRoutePlan plan, ChatRouteContext context)
+    {
+        IReadOnlyList<RoutingChatModel> primary = plan.OrderedModels;
+        if (_fallback is null)
+        {
+            var planOnly = new RoutingChatModel[primary.Count];
+            for (int i = 0; i < primary.Count; i++)
+            {
+                planOnly[i] = primary[i];
+            }
+
+            return planOnly;
+        }
+
+        var seen = new HashSet<RoutingChatModel>();
+        var result = new List<RoutingChatModel>(_models.Length);
+        foreach (RoutingChatModel model in primary)
+        {
+            if (seen.Add(model))
+            {
+                result.Add(model);
+            }
+        }
+
+        var remaining = new List<RoutingChatModel>(_models.Length);
+        foreach (RoutingChatModel model in _models)
+        {
+            if (!seen.Contains(model))
+            {
+                remaining.Add(model);
+            }
+        }
+
+        IReadOnlyList<RoutingChatModel>? tail = _fallback(context, remaining);
+        if (tail is not null)
+        {
+            foreach (RoutingChatModel model in tail)
+            {
+                if (model is not null && seen.Add(model))
+                {
+                    result.Add(model);
+                }
+            }
+        }
+
+        return result.ToArray();
+    }
 
     private static async ValueTask<bool> PlanRemainsValidAsync(ChatRoutePlan plan, ChatRouteContext context, CancellationToken cancellationToken) =>
         plan.RemainsValid is null || await plan.RemainsValid(context, cancellationToken);

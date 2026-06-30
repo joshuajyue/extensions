@@ -301,35 +301,11 @@
       ]
     },
     {
-      "Type": "sealed class Microsoft.Extensions.AI.ChatRouteAttempt",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRouteAttempt.ChatRouteAttempt(Microsoft.Extensions.AI.RoutingChatModel model, int attemptNumber, System.Exception? exception = null);",
-          "Stage": "Experimental"
-        }
-      ],
-      "Properties": [
-        {
-          "Member": "int Microsoft.Extensions.AI.ChatRouteAttempt.AttemptNumber { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Exception? Microsoft.Extensions.AI.ChatRouteAttempt.Exception { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.RoutingChatModel Microsoft.Extensions.AI.ChatRouteAttempt.Model { get; }",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
       "Type": "sealed class Microsoft.Extensions.AI.ChatRouteContext",
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.ChatRouteContext.ChatRouteContext(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models, Microsoft.Extensions.AI.ChatRouteAttempt? previousAttempt = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRouteContext.ChatRouteContext(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models);",
           "Stage": "Experimental"
         }
       ],
@@ -344,10 +320,6 @@
         },
         {
           "Member": "Microsoft.Extensions.AI.ChatOptions? Microsoft.Extensions.AI.ChatRouteContext.Options { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRouteAttempt? Microsoft.Extensions.AI.ChatRouteContext.PreviousAttempt { get; }",
           "Stage": "Experimental"
         }
       ]
@@ -1829,7 +1801,7 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, Microsoft.Extensions.AI.RoutingStickiness stickiness = Microsoft.Extensions.AI.RoutingStickiness.EveryCall);",
+          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, Microsoft.Extensions.AI.RoutingStickiness stickiness = Microsoft.Extensions.AI.RoutingStickiness.EveryCall, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>>? fallback = null);",
           "Stage": "Experimental"
         },
         {
@@ -1901,6 +1873,14 @@
         },
         {
           "Member": "Microsoft.Extensions.AI.RoutingChatClient Microsoft.Extensions.AI.RoutingChatClientBuilder.Build();",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatClientBuilder Microsoft.Extensions.AI.RoutingChatClientBuilder.UseFallback();",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatClientBuilder Microsoft.Extensions.AI.RoutingChatClientBuilder.UseFallback(System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>> fallback);",
           "Stage": "Experimental"
         },
         {
