@@ -5,10 +5,10 @@
 ## What it is
 
 `RoutingChatClient` is an `IChatClient` that owns **N** candidate models and forwards each
-request to one of them. It is the routing **mechanism**: it holds the candidates, caches
-decisions, walks fallbacks on failure, and records the chosen model on the response. It holds
-**no opinion** about which model is better — that is delegated entirely to a swappable
-selection **policy**, an `IChatRouteSelector`.
+request to one of them. It is the routing **mechanism**: it holds the candidates, applies a
+soft capability gate, caches decisions, walks fallbacks on failure, and records the chosen
+model on the response. It holds **no opinion** about which model is better — that is delegated
+entirely to a swappable selection **policy**, an `IChatRouteSelector`.
 
 When no selector is supplied the default is deterministic and opinion-free: it honors
 `ChatOptions.ModelId` when set (matching a model's `ModelId` or `Name`), otherwise it uses the
@@ -43,6 +43,30 @@ Because each candidate is itself an `IChatClient`, a routing pipeline forms a **
 - **Decision middleware:** selectors compose as decorators (for example, sticky → semantic →
   default).
 - A branch may itself be a `RoutingChatClient`, giving a recursive routing tree.
+
+## Capability gate
+
+Before any selector runs, the router applies a **soft capability gate**. It narrows the
+candidate models to those that can satisfy capabilities the request **provably** needs, using
+only high-confidence signals derived from the request itself — never an estimate or a guess:
+
+- a message carrying image content (`DataContent`/`UriContent` with an `image/*` media type)
+  requires `RoutingChatModelTraits.Vision`;
+- supplying `ChatOptions.Tools` requires `RoutingChatModelTraits.ToolCalling`.
+
+This is a **correctness filter**, not a quality signal: it is shared by every selector *and*
+the fallback chain, so a selector never has to re-implement "can this model even handle the
+request". Fuzzier dimensions (such as "this looks like a reasoning task") are deliberately
+excluded — judging the request is a selector's job.
+
+The gate is **soft** in two ways:
+
+- **Fallthrough:** if no registered model positively declares a required capability (sparse or
+  incorrect trait metadata), the gate returns the full candidate set rather than stranding the
+  request. A model only gets excluded when at least one *other* model declares the capability.
+- **Bypass:** `RoutingChatClientBuilder.UseCapabilityGate(false)` disables it globally for the
+  router (it is on by default). Use this when you don't trust the catalog's trait metadata and
+  want the selector/`ModelId` to have the final say.
 
 ## Building a router
 
@@ -84,7 +108,6 @@ IChatClient root = new RoutingChatClientBuilder(catalog)
         inputTokenCostPerMillion: 1,
         outputTokenCostPerMillion: 2,
         typicalLatency: TimeSpan.FromMilliseconds(250))
-    .UseSelector(RuleBasedChatRouteSelector.Instance)   // optional; omit for the opinion-free default
     .UseStickiness(RoutingStickiness.ByConversationId)
     .Build();
 
@@ -136,14 +159,6 @@ predicate (see Stickiness).
 
 Built-in, experimental policies:
 
-- **`RuleBasedChatRouteSelector`** — a deterministic heuristic that applies hard **capability gates**
-  and then ranks by cost. It infers the required capability traits from the request (tool use →
-  `ToolCalling`; reasoning options → `Reasoning`) and treats both **capability** and **context fit** as
-  eligibility gates: a model that lacks a required trait or whose `MaxInputTokens` can't hold the
-  estimated prompt is ranked last (used only as a last-resort fallback). Eligible models are then ranked
-  by **cost**, with latency as the tie-breaker. Traits are a correctness gate, **not** a quality signal —
-  advertising more capabilities than the request needs never raises a model's rank. Ties preserve
-  registration order.
 - **`ComplexityChatRouteSelector`** — a deterministic port of LiteLLM's complexity router; see
   [Complexity-based routing](#complexity-based-routing-litellm-style) below.
 - **`SemanticChatRouteSelector`** — a faithful port of LiteLLM's semantic (auto) router; embedding-based,
@@ -292,8 +307,9 @@ routing is just another selector, it composes with the rest of the mechanism: re
 stickiness, and nesting all apply unchanged. Since a tier classifier picks exactly one model, its
 plan is a **single model** — to get fallback, pair it with the router's `UseFallback()` policy (see
 [Fallback](#fallback-circuit-breaking) above), which owns the order in which the other models are
-tried. (It also does **not** apply the `RuleBasedChatRouteSelector` context-window hard-filter —
-pair it with capacity-aware tier mappings if a tier's model has a small context window.)
+tried. (Capability gating still applies — the router's soft capability gate runs before the tier
+classifier — but the classifier does not itself apply a context-window filter, so pair it with
+capacity-aware tier mappings if a tier's model has a small context window.)
 
 ## Model metadata and currency
 

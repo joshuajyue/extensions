@@ -1801,7 +1801,7 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, Microsoft.Extensions.AI.RoutingStickiness stickiness = Microsoft.Extensions.AI.RoutingStickiness.EveryCall, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>>? fallback = null);",
+          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, Microsoft.Extensions.AI.RoutingStickiness stickiness = Microsoft.Extensions.AI.RoutingStickiness.EveryCall, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>>? fallback = null, bool capabilityGate = true);",
           "Stage": "Experimental"
         },
         {
@@ -1873,6 +1873,10 @@
         },
         {
           "Member": "Microsoft.Extensions.AI.RoutingChatClient Microsoft.Extensions.AI.RoutingChatClientBuilder.Build();",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatClientBuilder Microsoft.Extensions.AI.RoutingChatClientBuilder.UseCapabilityGate(bool enabled = true);",
           "Stage": "Experimental"
         },
         {
@@ -2055,26 +2059,6 @@
           "Member": "const Microsoft.Extensions.AI.RoutingStickiness Microsoft.Extensions.AI.RoutingStickiness.PerInstance",
           "Stage": "Experimental",
           "Value": "1"
-        }
-      ]
-    },
-    {
-      "Type": "sealed class Microsoft.Extensions.AI.RuleBasedChatRouteSelector : Microsoft.Extensions.AI.IChatRouteSelector",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.RuleBasedChatRouteSelector.RuleBasedChatRouteSelector();",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan> Microsoft.Extensions.AI.RuleBasedChatRouteSelector.SelectRouteAsync(Microsoft.Extensions.AI.ChatRouteContext context, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
-          "Stage": "Experimental"
-        }
-      ],
-      "Properties": [
-        {
-          "Member": "static Microsoft.Extensions.AI.RuleBasedChatRouteSelector Microsoft.Extensions.AI.RuleBasedChatRouteSelector.Instance { get; }",
-          "Stage": "Experimental"
         }
       ]
     },

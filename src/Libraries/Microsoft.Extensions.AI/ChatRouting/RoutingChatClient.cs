@@ -32,10 +32,19 @@ namespace Microsoft.Extensions.AI;
 /// <see cref="ChatOptions.ModelId"/> when set, otherwise it uses the first registered model.
 /// </para>
 /// <para>
+/// Before a selector runs, the router applies a soft <em>capability gate</em>: it narrows the candidate
+/// models to those that can satisfy capabilities the request provably needs (image content requires
+/// <see cref="RoutingChatModelTraits.Vision"/>; supplied <see cref="ChatOptions.Tools"/> require
+/// <see cref="RoutingChatModelTraits.ToolCalling"/>). This is a correctness filter shared by every selector
+/// and the fallback chain — not a quality signal. It is soft: when no registered model declares a required
+/// capability, the gate falls through to the full set rather than stranding the request, and it can be
+/// bypassed entirely via <see cref="RoutingChatClientBuilder.UseCapabilityGate(bool)"/>.
+/// </para>
+/// <para>
 /// A selector returns a <see cref="ChatRoutePlan"/> of the models it prefers, primary first. The router
 /// attempts those in order; if every model in the plan fails, an optional <em>fallback policy</em> (a
 /// delegate supplied via the constructor or <see cref="RoutingChatClientBuilder.UseFallback()"/>) decides
-/// the order in which any remaining registered models are tried. This lets a selector that naturally picks
+/// the order in which any remaining candidate models are tried. This lets a selector that naturally picks
 /// a single model (for example a complexity classifier) stay out of the fallback business: it returns just
 /// its primary, and the router owns failure handling.
 /// </para>
@@ -61,6 +70,7 @@ public class RoutingChatClient : IChatClient
     private readonly IChatRouteSelector? _selector;
     private readonly RoutingStickiness _stickiness;
     private readonly Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? _fallback;
+    private readonly bool _capabilityGate;
 
     private readonly ConcurrentDictionary<string, ChatRoutePlan>? _planByConversationId;
     private ChatRoutePlan? _instancePlan;
@@ -74,11 +84,19 @@ public class RoutingChatClient : IChatClient
     /// this delegate receives the route context and the registered models not already in the plan, and returns
     /// the order in which to try them. When <see langword="null"/>, the router only attempts the plan's models.
     /// </param>
+    /// <param name="capabilityGate">
+    /// When <see langword="true"/> (the default), the router narrows the candidate models to those that can satisfy
+    /// capabilities the request provably needs before the selector runs — a model with image content requires
+    /// <see cref="RoutingChatModelTraits.Vision"/>, and supplying tools requires <see cref="RoutingChatModelTraits.ToolCalling"/>.
+    /// The gate is soft: if no registered model declares a required capability, it falls through to the full set rather
+    /// than stranding the request. When <see langword="false"/>, every registered model is always a candidate.
+    /// </param>
     public RoutingChatClient(
         IReadOnlyList<RoutingChatModel> models,
         IChatRouteSelector? selector = null,
         RoutingStickiness stickiness = RoutingStickiness.EveryCall,
-        Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? fallback = null)
+        Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? fallback = null,
+        bool capabilityGate = true)
     {
         if (!Enum.IsDefined(typeof(RoutingStickiness), stickiness))
         {
@@ -90,6 +108,7 @@ public class RoutingChatClient : IChatClient
         _selector = selector;
         _stickiness = stickiness;
         _fallback = fallback;
+        _capabilityGate = capabilityGate;
 
         if (stickiness == RoutingStickiness.ByConversationId)
         {
@@ -106,10 +125,11 @@ public class RoutingChatClient : IChatClient
         _ = Throw.IfNull(messages);
 
         IEnumerable<ChatMessage> normalizedMessages = NormalizeMessages(messages);
-        var context = new ChatRouteContext(normalizedMessages, options, _modelList);
+        IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
+        var context = new ChatRouteContext(normalizedMessages, options, candidates);
         ChatRoutePlan plan = await GetPlanAsync(context, cancellationToken);
 
-        RoutingChatModel[] ordered = BuildAttemptOrder(plan, context);
+        RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
         for (int i = 0; i < ordered.Length; i++)
         {
             RoutingChatModel model = ValidateRoutedModel(ordered[i]);
@@ -140,10 +160,11 @@ public class RoutingChatClient : IChatClient
         _ = Throw.IfNull(messages);
 
         IEnumerable<ChatMessage> normalizedMessages = NormalizeMessages(messages);
-        var context = new ChatRouteContext(normalizedMessages, options, _modelList);
+        IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
+        var context = new ChatRouteContext(normalizedMessages, options, candidates);
         ChatRoutePlan plan = await GetPlanAsync(context, cancellationToken);
 
-        RoutingChatModel[] ordered = BuildAttemptOrder(plan, context);
+        RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
         for (int i = 0; i < ordered.Length; i++)
         {
             RoutingChatModel model = ValidateRoutedModel(ordered[i]);
@@ -280,10 +301,81 @@ public class RoutingChatClient : IChatClient
             ? new ValueTask<ChatRoutePlan>(DefaultSelectRoute(context))
             : _selector.SelectRouteAsync(context, cancellationToken);
 
+    // The router's capability gate. Narrows the registered models to those that can satisfy capabilities the
+    // request provably needs, so every selector — and the fallback chain — only ever sees capable candidates.
+    // Only high-confidence signals are used (image content -> Vision, supplied tools -> ToolCalling); nothing
+    // is inferred from estimates. The gate is soft: when no registered model positively declares a required
+    // capability (sparse or incorrect trait metadata), it returns the full set rather than stranding the request.
+    private ReadOnlyCollection<RoutingChatModel> GetCandidateModels(IEnumerable<ChatMessage> messages, ChatOptions? options)
+    {
+        if (!_capabilityGate)
+        {
+            return _modelList;
+        }
+
+        RoutingChatModelTraits required = GetRequiredCapabilities(messages, options);
+        if (required == RoutingChatModelTraits.None)
+        {
+            return _modelList;
+        }
+
+        List<RoutingChatModel>? capable = null;
+        foreach (RoutingChatModel model in _models)
+        {
+            if ((model.Traits & required) == required)
+            {
+                (capable ??= new List<RoutingChatModel>(_models.Length)).Add(model);
+            }
+        }
+
+        return capable is { Count: > 0 } ? new ReadOnlyCollection<RoutingChatModel>(capable) : _modelList;
+    }
+
+    // Derives the capabilities a request provably requires, using only signals that cannot be wrong about the
+    // request itself: a message carrying image content needs a vision model, and supplying tools needs a
+    // tool-calling model. Fuzzier dimensions (such as "reasoning") are deliberately excluded — they are a
+    // selector's job to weigh, not a hard correctness gate.
+    private static RoutingChatModelTraits GetRequiredCapabilities(IEnumerable<ChatMessage> messages, ChatOptions? options)
+    {
+        RoutingChatModelTraits required = RoutingChatModelTraits.None;
+
+        if (options?.Tools is { Count: > 0 })
+        {
+            required |= RoutingChatModelTraits.ToolCalling;
+        }
+
+        if (MessagesContainImage(messages))
+        {
+            required |= RoutingChatModelTraits.Vision;
+        }
+
+        return required;
+    }
+
+    private static bool MessagesContainImage(IEnumerable<ChatMessage> messages)
+    {
+        foreach (ChatMessage message in messages)
+        {
+            IList<AIContent> contents = message.Contents;
+            for (int i = 0; i < contents.Count; i++)
+            {
+                switch (contents[i])
+                {
+                    case DataContent data when data.HasTopLevelMediaType("image"):
+                    case UriContent uri when uri.HasTopLevelMediaType("image"):
+                        return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     // Builds the ordered sequence the router actually attempts: the selected plan's models first, then —
-    // if a fallback policy is configured — the registered models the plan omitted, in the order the policy
+    // if a fallback policy is configured — the candidate models the plan omitted, in the order the policy
     // returns. Duplicates and models already in the plan are dropped so each candidate is tried at most once.
-    private RoutingChatModel[] BuildAttemptOrder(ChatRoutePlan plan, ChatRouteContext context)
+    // The fallback tail is drawn from the same gated candidate set the selector saw, never the full registry.
+    private RoutingChatModel[] BuildAttemptOrder(ChatRoutePlan plan, ChatRouteContext context, IReadOnlyList<RoutingChatModel> candidates)
     {
         IReadOnlyList<RoutingChatModel> primary = plan.OrderedModels;
         if (_fallback is null)
@@ -298,7 +390,7 @@ public class RoutingChatClient : IChatClient
         }
 
         var seen = new HashSet<RoutingChatModel>();
-        var result = new List<RoutingChatModel>(_models.Length);
+        var result = new List<RoutingChatModel>(candidates.Count);
         foreach (RoutingChatModel model in primary)
         {
             if (seen.Add(model))
@@ -307,8 +399,8 @@ public class RoutingChatClient : IChatClient
             }
         }
 
-        var remaining = new List<RoutingChatModel>(_models.Length);
-        foreach (RoutingChatModel model in _models)
+        var remaining = new List<RoutingChatModel>(candidates.Count);
+        foreach (RoutingChatModel model in candidates)
         {
             if (!seen.Contains(model))
             {

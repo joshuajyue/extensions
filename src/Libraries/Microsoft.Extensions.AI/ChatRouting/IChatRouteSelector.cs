@@ -13,7 +13,7 @@ namespace Microsoft.Extensions.AI;
 /// The routing mechanism (<see cref="RoutingChatClient"/>) is intentionally opinion-free; all
 /// knowledge about which model is better, or what the user is asking for, lives in an
 /// implementation of this interface. Use <see cref="ChatRouteSelector.Create(System.Func{ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask{ChatRoutePlan}})"/>
-/// for inline delegates, or one of the built-in policies such as <see cref="RuleBasedChatRouteSelector"/>
+/// for inline delegates, or one of the built-in policies such as <see cref="ComplexityChatRouteSelector"/>
 /// or <see cref="SemanticChatRouteSelector"/>.
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]

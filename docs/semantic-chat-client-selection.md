@@ -177,7 +177,7 @@ same generator, so the comparison is apples-to-apples.
 **Not ideal:**
 - All models cost roughly the same (the overhead is not justified).
 - Ultra-low-latency requirements where any extra embedding call is unacceptable.
-- Homogeneous query types, where `RuleBasedChatRouteSelector` or the default is sufficient.
+- Homogeneous query types, where `ComplexityChatRouteSelector` or the default is sufficient.
 
 ## Notes and tuning (`SemanticRouterOptions`)
 
@@ -205,6 +205,6 @@ same generator, so the comparison is apples-to-apples.
 | Strategy | Implementation | Latency | Setup |
 |---|---|---|---|
 | Default (pin / first) | `ChatOptions.ModelId` or `Models[0]` | ~0 ms | trivial |
-| `RuleBasedChatRouteSelector` | capability gate, context fit, cost | ~1–5 ms | low |
+| `ComplexityChatRouteSelector` | deterministic keyword/pattern tiering | ~1 ms | low |
 | `SemanticChatRouteSelector` | embedding + cosine similarity | ~embedding call | medium |
 | LLM classification | full inference | high | high |

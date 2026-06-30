@@ -43,7 +43,7 @@ The folder divides cleanly into three groups:
 |---|---|
 | **Mechanism** | `RoutingChatClient`, `RoutingChatClientBuilder`, `RoutingStickiness`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
 | **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan` |
-| **Shipped policies & adapters** | `RuleBasedChatRouteSelector`, `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `ChatModelCatalog` (+ `ChatModelCatalogOptions`) |
+| **Shipped policies & adapters** | `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `ChatModelCatalog` (+ `ChatModelCatalogOptions`) |
 
 ---
 
@@ -86,7 +86,7 @@ Internally it wraps the delegate in a private `DelegatingChatRouteSelector`. Con
 |---|---|---|
 | `IChatRouteSelector` | the interface (contract) | no (interface) |
 | `ChatRouteSelector` | a static factory holding `Create(...)` | no (static) |
-| `RuleBasedChatRouteSelector`, `SemanticChatRouteSelector`, `ComplexityChatRouteSelector` | concrete policies | yes |
+| `SemanticChatRouteSelector`, `ComplexityChatRouteSelector` | concrete policies | yes |
 
 So the capability comparison is *not* "`ChatRouteSelector` vs `ComplexityChatRouteSelector`." It's:
 a **pre-built appliance** (a concrete selector with domain logic baked in) vs. a **bring-your-own-
@@ -155,7 +155,14 @@ The heart of the feature, and an `IChatClient` itself. Responsibilities, in orde
 
 1. **Normalize** the messages into a re-enumerable list (`NormalizeMessages`) so the selector and the
    invocation see the same sequence without double-enumerating a lazy source.
-2. **Get a plan** (`GetPlanAsync`), honoring the configured `RoutingStickiness`:
+2. **Apply the capability gate** (`GetCandidateModels`) — narrow the registered models to those that
+   can satisfy the capabilities the request *provably* needs (image content ⇒ `Vision`; supplied
+   `ChatOptions.Tools` ⇒ `ToolCalling`). The gate is **soft**: if no model declares a required
+   capability it returns the full set rather than stranding the request, and `UseCapabilityGate(false)`
+   disables it entirely. The resulting candidate set feeds both the `ChatRouteContext` the selector sees
+   and the fallback chain. Only high-confidence, request-derived signals are used — fuzzy dimensions
+   (e.g. "reasoning") are left to the selector.
+3. **Get a plan** (`GetPlanAsync`), honoring the configured `RoutingStickiness`:
    - `EveryCall` → run the selector every time.
    - `PerInstance` → run once, cache on the instance (`_instancePlan`, guarded with
      `Volatile.Read/Write`), reuse for all later requests.
@@ -163,20 +170,20 @@ The heart of the feature, and an `IChatClient` itself. Responsibilities, in orde
      conversation id, transparently behave like `EveryCall`.
    Before reusing any cached plan it awaits `PlanRemainsValidAsync`, which calls the plan's
    `RemainsValid` predicate (if any) and re-runs the selector when it returns `false`.
-3. **Run the selector** (`RunSelectorAsync`) — or, when no selector was supplied, the opinion-free
+4. **Run the selector** (`RunSelectorAsync`) — or, when no selector was supplied, the opinion-free
    `DefaultSelectRoute`: honor `ChatOptions.ModelId` (matched against each model's `ModelId` or
    `Name`), otherwise the first registered model.
-4. **Build the attempt order** (`BuildAttemptOrder`) — start with `plan.OrderedModels`; if a fallback
-   policy was configured (`UseFallback`), append the registered models the plan omitted, in the order
+5. **Build the attempt order** (`BuildAttemptOrder`) — start with `plan.OrderedModels`; if a fallback
+   policy was configured (`UseFallback`), append the candidate models the plan omitted, in the order
    the policy returns, de-duped so each candidate is tried at most once.
-5. **Invoke with fallback** — walk that attempt order; call `GetResponseAsync` on each model's
+6. **Invoke with fallback** — walk that attempt order; call `GetResponseAsync` on each model's
    `Client`. On exception, the `catch ... when (i < ordered.Length - 1 && !ct.IsCancellationRequested)`
    guard falls through to the next model; the final model's exception propagates. Cancellation is
    never swallowed.
-6. **Forward options carefully** (`CreateForwardedOptions`): the chosen model's provider `ModelId` is
+7. **Forward options carefully** (`CreateForwardedOptions`): the chosen model's provider `ModelId` is
    injected **only** when the caller didn't already pin one, by cloning the options. Routing internals
    are **never** written into the forwarded request — the inner client sees a clean request.
-7. **Stamp the result** (`StampResponse`): write the selected model's name/id/provider into the
+8. **Stamp the result** (`StampResponse`): write the selected model's name/id/provider into the
    response's `AdditionalProperties` (keys `routing.selected_model`, `routing.selected_model_id`,
    `routing.selected_provider`) and tag the current `Activity` for telemetry.
 
@@ -212,6 +219,7 @@ A small builder that accumulates models and configuration, then `Build()`s a `Ro
   (the latter two route through `ChatRouteSelector.Create`). Passing `null` selects the opinion-free
   default.
 - `UseStickiness(RoutingStickiness)` — set the caching scope.
+- `UseCapabilityGate(bool)` — toggle the router's soft capability gate (on by default).
 
 It's deliberately thin: all real behavior lives in `RoutingChatClient`.
 
@@ -265,30 +273,6 @@ selector's own validity rule says the situation changed."
 ---
 
 ## The shipped policies
-
-### `RuleBasedChatRouteSelector.cs` — deterministic, gate-then-cost ranking
-
-A stateless (singleton `Instance`) policy that **ranks all models** and returns them as a plan
-(best-ranked primary, the rest fallbacks). The comparison (`CompareModels`) applies hard
-**eligibility gates** first and then ranks the survivors by cost and latency:
-
-1. **Eligibility (hard gate).** A model is eligible only when it (a) declares every **required
-   capability** and (b) can **fit the prompt** in its context window. Both are guaranteed-to-fail
-   conditions, so eligible models always rank above ineligible ones (ineligible models stay in the
-   plan but only as last-resort fallbacks).
-   - **Required traits** are *inferred from the request*: `options.Tools` ⇒ `ToolCalling`,
-     `options.Reasoning` ⇒ `Reasoning`. Traits are a **capability gate (a correctness filter), never
-     a quality/performance signal** — a model is *not* preferred for advertising more traits than the
-     request needs, because modern chat models largely share the same capability flags. (Only these
-     two objective inferences are made — nothing subjective.)
-   - **Context fit** uses a rough estimate (~4 chars/token); an unknown context window is assumed to
-     fit (can't prove it won't).
-2. **Cost** (lower total input+output `...CostPerMillion` is better).
-3. **Latency** (lower `TypicalLatency` is better).
-
-Ties preserve registration order (the sort is stable, and unknown values sort consistently via the
-`CompareLowerIsBetter` helpers). This is the "sensible default ranking" policy — useful out of the
-box, easy to reason about, no I/O.
 
 ### `SemanticChatRouteSelector.cs` (+ `SemanticRouterOptions.cs`, `SemanticRouteAggregation.cs`) — embedding-based routing
 
@@ -406,10 +390,11 @@ each mechanism guarantee:
 - **Streaming:** stamps only the first update; falls back before the first update is produced.
 - **Plumbing:** `GetService` returns both the client and the selector; `Dispose` disposes each client
   exactly once (verified with a `CountingDisposeClient`).
-- **Shipped selectors (integration):** `RuleBasedChatRouteSelector` prefers lower cost with no signal,
-  prefers a tool-calling model when tools are requested, treats extra traits as *not* a quality signal
-  (a richer-but-pricier model never outranks a cheaper one absent a required capability), and ranks a
-  model that lacks a required capability last even when it is cheaper; `SemanticChatRouteSelector`
+- **Capability gate (integration):** an image request narrows to a `Vision` model and a tools request
+  narrows to a `ToolCalling` model (even under the opinion-free default selector); the gate falls
+  through to the full set when no model declares the capability; `UseCapabilityGate(false)` bypasses it
+  and routes to the otherwise-ineligible primary.
+- **Shipped selectors (integration):** `SemanticChatRouteSelector`
   routes to the most similar model, aggregates a model's matches by mean (or sum/max), applies the
   global top-k, honors per-model thresholds, and falls back to the default model when nothing passes
   the threshold or the request has no user text.

@@ -387,14 +387,16 @@ public class RoutingChatClientTests
     public void GetService_ReturnsClientAndSelector()
     {
         using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
-        IChatRouteSelector selector = RuleBasedChatRouteSelector.Instance;
+        var selector = new ComplexityChatRouteSelector(
+            new Dictionary<ChatComplexityTier, string> { [ChatComplexityTier.Simple] = "m1" },
+            defaultModel: "m1");
 
         using var client = new RoutingChatClient([new RoutingChatModel("m1", client: inner)], selector);
 
         Assert.Same(client, client.GetService(typeof(RoutingChatClient)));
         Assert.Same(client, client.GetService(typeof(IChatClient)));
         Assert.Same(selector, client.GetService(typeof(IChatRouteSelector)));
-        Assert.Same(selector, client.GetService(typeof(RuleBasedChatRouteSelector)));
+        Assert.Same(selector, client.GetService(typeof(ComplexityChatRouteSelector)));
         Assert.Null(client.GetService(typeof(string)));
     }
 
@@ -448,78 +450,90 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task RuleBasedSelector_PrefersLowerCostWithoutSignal()
+    public async Task CapabilityGate_NarrowsToVisionModel_WhenRequestContainsImage()
     {
-        var models = new[]
+        bool plainCalled = false;
+        bool visionCalled = false;
+        using var plain = new TestChatClient
         {
-            new RoutingChatModel("expensive", inputTokenCostPerMillion: 10m, outputTokenCostPerMillion: 10m),
-            new RoutingChatModel("cheap", inputTokenCostPerMillion: 1m, outputTokenCostPerMillion: 1m),
+            GetResponseAsyncCallback = (_, _, _) => { plainCalled = true; return Task.FromResult(new ChatResponse()); },
+        };
+        using var vision = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, _, _) => { visionCalled = true; return Task.FromResult(new ChatResponse()); },
         };
 
-        var context = new ChatRouteContext([new(ChatRole.User, "hello there")], options: null, models);
-        ChatRoutePlan plan = await RuleBasedChatRouteSelector.Instance.SelectRouteAsync(context);
+        // The default (empty) selector pins to Models[0]; the gate must remove the non-vision first model so
+        // the image request routes to the vision-capable one.
+        using var client = new RoutingChatClient(
+        [
+            new RoutingChatModel("plain", client: plain),
+            new RoutingChatModel("vision", client: vision, traits: RoutingChatModelTraits.Vision),
+        ]);
 
-        Assert.Equal("cheap", plan.OrderedModels[0].Name);
+        var message = new ChatMessage(ChatRole.User, [new DataContent(new byte[] { 1, 2, 3 }, "image/png")]);
+        ChatResponse response = await client.GetResponseAsync([message]);
+
+        Assert.Equal("vision", response.AdditionalProperties![RoutingChatClient.SelectedModelNameKey]);
+        Assert.True(visionCalled);
+        Assert.False(plainCalled);
     }
 
     [Fact]
-    public async Task RuleBasedSelector_PrefersToolCallingModelWhenToolsRequested()
+    public async Task CapabilityGate_NarrowsToToolCallingModel_WhenToolsRequested()
     {
-        var models = new[]
-        {
-            new RoutingChatModel("plain"),
-            new RoutingChatModel("tools", traits: RoutingChatModelTraits.ToolCalling),
-        };
+        using var plain = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
+        using var tools = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
+
+        using var client = new RoutingChatClient(
+        [
+            new RoutingChatModel("plain", client: plain),
+            new RoutingChatModel("tools", client: tools, traits: RoutingChatModelTraits.ToolCalling),
+        ]);
 
         var options = new ChatOptions { Tools = [AIFunctionFactory.Create(() => "ok", "get_status")] };
-        var context = new ChatRouteContext([new(ChatRole.User, "what is the status")], options, models);
-        ChatRoutePlan plan = await RuleBasedChatRouteSelector.Instance.SelectRouteAsync(context);
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "status?")], options);
 
-        Assert.Equal("tools", plan.OrderedModels[0].Name);
+        Assert.Equal("tools", response.AdditionalProperties![RoutingChatClient.SelectedModelNameKey]);
     }
 
     [Fact]
-    public async Task RuleBasedSelector_ExtraTraitsAreNotAQualitySignal()
+    public async Task CapabilityGate_FallsThrough_WhenNoModelDeclaresCapability()
     {
-        // With no capability required by the request, a model advertising extra traits must not
-        // outrank a cheaper model: traits are a capability gate, not a quality/performance signal.
-        var models = new[]
-        {
-            new RoutingChatModel(
-                "rich",
-                inputTokenCostPerMillion: 10m,
-                outputTokenCostPerMillion: 10m,
-                traits: RoutingChatModelTraits.ToolCalling | RoutingChatModelTraits.Vision | RoutingChatModelTraits.Reasoning),
-            new RoutingChatModel("cheap", inputTokenCostPerMillion: 1m, outputTokenCostPerMillion: 1m),
-        };
+        // Soft gate: when no registered model positively declares the required capability (sparse or wrong
+        // trait metadata), the router must not strand the request — it falls back to the full candidate set.
+        using var only = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
 
-        var context = new ChatRouteContext([new(ChatRole.User, "hello there")], options: null, models);
-        ChatRoutePlan plan = await RuleBasedChatRouteSelector.Instance.SelectRouteAsync(context);
+        using var client = new RoutingChatClient([new RoutingChatModel("only", client: only)]);
 
-        Assert.Equal("cheap", plan.OrderedModels[0].Name);
+        var message = new ChatMessage(ChatRole.User, [new DataContent(new byte[] { 1, 2, 3 }, "image/png")]);
+        ChatResponse response = await client.GetResponseAsync([message]);
+
+        Assert.Equal("only", response.AdditionalProperties![RoutingChatClient.SelectedModelNameKey]);
     }
 
     [Fact]
-    public async Task RuleBasedSelector_RanksModelMissingRequiredTraitLastEvenWhenCheaper()
+    public async Task CapabilityGate_Disabled_RoutesToNonCapableModel()
     {
-        // The capability gate is hard: a cheaper model that cannot satisfy a required capability is
-        // ranked behind a pricier model that can, so it is only ever a last-resort fallback.
-        var models = new[]
+        bool plainCalled = false;
+        using var plain = new TestChatClient
         {
-            new RoutingChatModel("cheap-no-tools", inputTokenCostPerMillion: 1m, outputTokenCostPerMillion: 1m),
-            new RoutingChatModel(
-                "pricey-tools",
-                inputTokenCostPerMillion: 10m,
-                outputTokenCostPerMillion: 10m,
-                traits: RoutingChatModelTraits.ToolCalling),
+            GetResponseAsyncCallback = (_, _, _) => { plainCalled = true; return Task.FromResult(new ChatResponse()); },
         };
+        using var vision = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
 
-        var options = new ChatOptions { Tools = [AIFunctionFactory.Create(() => "ok", "get_status")] };
-        var context = new ChatRouteContext([new(ChatRole.User, "what is the status")], options, models);
-        ChatRoutePlan plan = await RuleBasedChatRouteSelector.Instance.SelectRouteAsync(context);
+        // Bypass the gate: the default selector pins to Models[0] even though it lacks Vision.
+        using var client = new RoutingChatClientBuilder()
+            .AddModel("plain", plain)
+            .AddModel("vision", vision, traits: RoutingChatModelTraits.Vision)
+            .UseCapabilityGate(false)
+            .Build();
 
-        Assert.Equal("pricey-tools", plan.OrderedModels[0].Name);
-        Assert.Equal("cheap-no-tools", plan.OrderedModels[^1].Name);
+        var message = new ChatMessage(ChatRole.User, [new DataContent(new byte[] { 1, 2, 3 }, "image/png")]);
+        ChatResponse response = await client.GetResponseAsync([message]);
+
+        Assert.Equal("plain", response.AdditionalProperties![RoutingChatClient.SelectedModelNameKey]);
+        Assert.True(plainCalled);
     }
 
     [Fact]

@@ -19,6 +19,7 @@ public sealed class RoutingChatClientBuilder
     private IChatRouteSelector? _selector;
     private RoutingStickiness _stickiness = RoutingStickiness.EveryCall;
     private Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? _fallback;
+    private bool _capabilityGate = true;
 
     /// <summary>Initializes a new instance of the <see cref="RoutingChatClientBuilder"/> class.</summary>
     /// <param name="catalog">Optional catalog used by <see cref="AddFromCatalog(string, IChatClient)"/>.</param>
@@ -179,7 +180,30 @@ public sealed class RoutingChatClientBuilder
         return this;
     }
 
+    /// <summary>Enables or bypasses the router's capability gate. The gate is enabled by default.</summary>
+    /// <param name="enabled"><see langword="true"/> to keep the capability gate enabled; <see langword="false"/> to bypass it.</param>
+    /// <returns>The current builder.</returns>
+    /// <remarks>
+    /// <para>
+    /// Before any selector runs, the router narrows the candidate models to those that can satisfy capabilities the
+    /// request provably needs, using only high-confidence signals: a message carrying image content requires a model
+    /// with <see cref="RoutingChatModelTraits.Vision"/>, and supplying <see cref="ChatOptions.Tools"/> requires
+    /// <see cref="RoutingChatModelTraits.ToolCalling"/>. This is a correctness filter shared by every selector and the
+    /// fallback chain, not a quality signal — selectors only ever choose among models that are already capable.
+    /// </para>
+    /// <para>
+    /// The gate is <i>soft</i>: if no registered model positively declares a required capability (for example because
+    /// the catalog metadata is sparse or wrong), the gate falls through to the full model set rather than stranding the
+    /// request. Use <c>UseCapabilityGate(false)</c> to bypass the gate entirely when you do not trust the trait metadata.
+    /// </para>
+    /// </remarks>
+    public RoutingChatClientBuilder UseCapabilityGate(bool enabled = true)
+    {
+        _capabilityGate = enabled;
+        return this;
+    }
+
     /// <summary>Builds a <see cref="RoutingChatClient"/>.</summary>
     /// <returns>A routing chat client.</returns>
-    public RoutingChatClient Build() => new(_models, _selector, _stickiness, _fallback);
+    public RoutingChatClient Build() => new(_models, _selector, _stickiness, _fallback, _capabilityGate);
 }
