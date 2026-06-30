@@ -53,7 +53,6 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
     private readonly SemanticRouteAggregation _aggregation;
     private readonly float _scoreThreshold;
     private readonly Dictionary<string, float>? _scoreThresholdByModel;
-    private readonly bool _reselectBelowThreshold;
     private readonly object _gate = new();
 
     private Task<ProfileIndex>? _profilesTask;
@@ -109,7 +108,6 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         _topK = options.TopK;
         _aggregation = options.Aggregation;
         _scoreThreshold = options.ScoreThreshold;
-        _reselectBelowThreshold = options.ReselectBelowThreshold;
         if (options.ScoreThresholdByModel is { Count: > 0 })
         {
             _scoreThresholdByModel = options.ScoreThresholdByModel.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
@@ -139,28 +137,7 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
             metadata = new Dictionary<string, object>(StringComparer.Ordinal) { [SemanticScoreMetadataKey] = primaryScore };
         }
 
-        // Under a sticky scope, the optional confidence floor keeps reusing this decision while the pinned model
-        // still meets its selection threshold for later turns, re-routing once the conversation drifts below it.
-        // Only a decision that won by passing its threshold gets a floor; a threshold-miss fallback stays put.
-        Func<ChatRouteContext, CancellationToken, ValueTask<bool>>? remainsValid = null;
-        if (_reselectBelowThreshold && winner is not null)
-        {
-            string pinnedModel = winner;
-            float floor = ThresholdFor(pinnedModel);
-            remainsValid = async (newContext, ct) =>
-            {
-                string? newQuery = GetLastUserText(newContext.Messages);
-                if (string.IsNullOrWhiteSpace(newQuery))
-                {
-                    return true;
-                }
-
-                Dictionary<string, double> rescored = await ScoreModelsAsync(newQuery!, newContext.Models, ct);
-                return rescored.TryGetValue(pinnedModel, out double score) && score >= floor;
-            };
-        }
-
-        return new ChatRoutePlan(OrderPlan(ctx.Models, primary, aggregated), remainsValid, metadata);
+        return new ChatRoutePlan(OrderPlan(ctx.Models, primary, aggregated), metadata);
     }
 
     // Orders the plan: the primary model first, then the remaining models by descending aggregated
@@ -197,8 +174,7 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
     }
 
     // Embeds the query, scores every registered model's utterances by cosine similarity, keeps the globally
-    // highest TopK matches, and reduces each model's matched scores with the configured aggregation. Shared by
-    // the initial selection and the optional confidence-floor revalidation so both compute scores identically.
+    // highest TopK matches, and reduces each model's matched scores with the configured aggregation.
     private async ValueTask<Dictionary<string, double>> ScoreModelsAsync(string query, IReadOnlyList<RoutingChatModel> models, CancellationToken cancellationToken)
     {
         ProfileIndex index = await EnsureProfilesAsync(cancellationToken);
@@ -242,7 +218,7 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
     }
 
     // Resolves the threshold a model must meet to be selected: its per-model override if present, else the
-    // global threshold. This same threshold is reused as the sticky confidence floor.
+    // global threshold.
     private float ThresholdFor(string modelName)
     {
         if (_scoreThresholdByModel is not null && _scoreThresholdByModel.TryGetValue(modelName, out float perModel))

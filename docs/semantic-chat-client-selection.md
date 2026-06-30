@@ -153,14 +153,12 @@ var selector = new SemanticChatRouteSelector(
         TopK = 5,                                 // global top-k utterance matches (LiteLLM default)
         Aggregation = SemanticRouteAggregation.Mean, // Mean (default), Sum, or Max
         ScoreThreshold = 0.3f,                    // LiteLLM's default encoder threshold
-        ReselectBelowThreshold = true,            // under a sticky scope, re-route when the pinned model drifts below threshold
     });
 
 IChatClient router = new RoutingChatClientBuilder()
     .AddModel("openai:gpt-4o-mini", gpt4oMiniClient, modelId: "gpt-4o-mini")
     .AddModel("openai:gpt-5.3", gpt53Client, modelId: "gpt-5.3")
     .UseSelector(selector)
-    .UseStickiness(RoutingStickiness.ByConversation)
     .Build();
 ```
 
@@ -196,13 +194,6 @@ same generator, so the comparison is apples-to-apples.
   threshold of 0 or below to always route to the best-scoring model.
 - **Caching.** Profiles are embedded once per selector instance. Wrap the embedder with
   `UseCaching()` so repeated/similar queries also avoid re-embedding.
-- **Stickiness.** Combine with `RoutingStickiness.ByConversation` (scoped by the caller-owned
-  `RoutingChatClient.ConversationKeyPropertyName` key) to keep a conversation on one model. To
-  re-route when the topic shifts, set `ReselectBelowThreshold = true`: the selector attaches a
-  built-in confidence floor that re-embeds each turn and re-routes once the pinned model's score
-  falls below its threshold (the same `ScoreThreshold` / `ScoreThresholdByModel` knob) — no custom
-  `ChatRoutePlan.RemainsValid` predicate needed. See
-  [routing-chat-client.md](routing-chat-client.md).
 
 ## Strategy comparison
 

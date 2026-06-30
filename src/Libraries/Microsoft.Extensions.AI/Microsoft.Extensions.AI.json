@@ -329,11 +329,11 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(Microsoft.Extensions.AI.RoutingChatModel model, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<bool>>? remainsValid = null, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(Microsoft.Extensions.AI.RoutingChatModel model, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
           "Stage": "Experimental"
         },
         {
-          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> orderedModels, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<bool>>? remainsValid = null, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> orderedModels, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
           "Stage": "Experimental"
         }
       ],
@@ -344,10 +344,6 @@
         },
         {
           "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.ChatRoutePlan.OrderedModels { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<bool>>? Microsoft.Extensions.AI.ChatRoutePlan.RemainsValid { get; }",
           "Stage": "Experimental"
         }
       ]
@@ -404,10 +400,6 @@
         },
         {
           "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.ComplexToReasoningThreshold { get; set; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "bool Microsoft.Extensions.AI.ComplexityRouterOptions.EscalateOnComplexity { get; set; }",
           "Stage": "Experimental"
         },
         {
@@ -1809,7 +1801,7 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, Microsoft.Extensions.AI.RoutingStickiness stickiness = Microsoft.Extensions.AI.RoutingStickiness.EveryCall, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>>? fallback = null, bool capabilityGate = true);",
+          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>>? fallback = null, bool capabilityGate = true);",
           "Stage": "Experimental"
         },
         {
@@ -1838,11 +1830,6 @@
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.AttemptEventName",
           "Stage": "Experimental",
           "Value": "routing.attempt"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.ConversationKeyPropertyName",
-          "Stage": "Experimental",
-          "Value": "routing.conversation_key"
         },
         {
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.DecisionEventName",
@@ -1920,10 +1907,6 @@
         },
         {
           "Member": "Microsoft.Extensions.AI.RoutingChatClientBuilder Microsoft.Extensions.AI.RoutingChatClientBuilder.UseSelector(System.Func<Microsoft.Extensions.AI.ChatRouteContext, Microsoft.Extensions.AI.ChatRoutePlan> selector);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.RoutingChatClientBuilder Microsoft.Extensions.AI.RoutingChatClientBuilder.UseStickiness(Microsoft.Extensions.AI.RoutingStickiness stickiness);",
           "Stage": "Experimental"
         }
       ],
@@ -2059,33 +2042,6 @@
       ]
     },
     {
-      "Type": "enum Microsoft.Extensions.AI.RoutingStickiness",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.RoutingStickiness.RoutingStickiness();",
-          "Stage": "Experimental"
-        }
-      ],
-      "Fields": [
-        {
-          "Member": "const Microsoft.Extensions.AI.RoutingStickiness Microsoft.Extensions.AI.RoutingStickiness.ByConversation",
-          "Stage": "Experimental",
-          "Value": "2"
-        },
-        {
-          "Member": "const Microsoft.Extensions.AI.RoutingStickiness Microsoft.Extensions.AI.RoutingStickiness.EveryCall",
-          "Stage": "Experimental",
-          "Value": "0"
-        },
-        {
-          "Member": "const Microsoft.Extensions.AI.RoutingStickiness Microsoft.Extensions.AI.RoutingStickiness.PerInstance",
-          "Stage": "Experimental",
-          "Value": "1"
-        }
-      ]
-    },
-    {
       "Type": "sealed class Microsoft.Extensions.AI.SemanticChatRouteSelector : Microsoft.Extensions.AI.IChatRouteSelector",
       "Stage": "Experimental",
       "Methods": [
@@ -2138,10 +2094,6 @@
       "Properties": [
         {
           "Member": "Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouterOptions.Aggregation { get; set; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "bool Microsoft.Extensions.AI.SemanticRouterOptions.ReselectBelowThreshold { get; set; }",
           "Stage": "Experimental"
         },
         {

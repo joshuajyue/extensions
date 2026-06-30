@@ -2,7 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -25,8 +24,8 @@ namespace Microsoft.Extensions.AI;
 /// <remarks>
 /// <para>
 /// <see cref="RoutingChatClient"/> is the routing <em>mechanism</em>: it owns the candidate models,
-/// caches decisions according to a <see cref="RoutingStickiness"/> scope, walks fallbacks on failure,
-/// and stamps the chosen model onto the response. It holds no opinion about which model is better —
+/// runs the selector once per request, walks fallbacks on failure, and stamps the chosen model onto the
+/// response. It holds no opinion about which model is better —
 /// that is entirely delegated to an <see cref="IChatRouteSelector"/> (the <em>policy</em>). When no
 /// selector is supplied, the default is deterministic and opinion-free: it honors
 /// <see cref="ChatOptions.ModelId"/> when set, otherwise it uses the first registered model.
@@ -66,19 +65,6 @@ public class RoutingChatClient : IChatClient
     public const string SelectedProviderNameKey = "routing.selected_provider";
 
     /// <summary>
-    /// The <see cref="ChatOptions.AdditionalProperties"/> key the router reads to scope a sticky routing decision when
-    /// <see cref="RoutingStickiness.ByConversation"/> is used.
-    /// </summary>
-    /// <remarks>
-    /// Set <c>options.AdditionalProperties["routing.conversation_key"]</c> to a stable, caller-owned value (for example
-    /// a GUID minted once per chat) so every request in the same logical conversation reuses one routing decision.
-    /// This is intentionally independent of <see cref="ChatOptions.ConversationId"/>, which is a provider state token
-    /// that may be absent (stateless providers) or change on every turn (some stateful providers) and is therefore
-    /// unfit as a stickiness key.
-    /// </remarks>
-    public const string ConversationKeyPropertyName = "routing.conversation_key";
-
-    /// <summary>
     /// The name of the <see cref="ActivityEvent"/> the router adds to <see cref="Activity.Current"/> for each
     /// model it attempts. Read these events with an <see cref="ActivityListener"/> (or any OpenTelemetry trace
     /// exporter) to observe the full per-request attempt timeline — the order models were tried, which failed
@@ -88,10 +74,9 @@ public class RoutingChatClient : IChatClient
 
     /// <summary>
     /// The name of the <see cref="ActivityEvent"/> the router adds to <see cref="Activity.Current"/> once per
-    /// request describing the routing decision: the selected model, the conversation key it was scoped to (when
-    /// <see cref="RoutingStickiness.ByConversation"/> is used), and any decision-rationale a selector attached via
-    /// <see cref="ChatRoutePlan.DecisionMetadata"/> (for example a complexity tier or a semantic similarity score).
-    /// Read it with an <see cref="ActivityListener"/> or any OpenTelemetry trace exporter.
+    /// request describing the routing decision: the selected model and any decision-rationale a selector attached
+    /// via <see cref="ChatRoutePlan.DecisionMetadata"/> (for example a complexity tier or a semantic similarity
+    /// score). Read it with an <see cref="ActivityListener"/> or any OpenTelemetry trace exporter.
     /// </summary>
     public const string DecisionEventName = "routing.decision";
 
@@ -113,17 +98,12 @@ public class RoutingChatClient : IChatClient
     private readonly RoutingChatModel[] _models;
     private readonly ReadOnlyCollection<RoutingChatModel> _modelList;
     private readonly IChatRouteSelector? _selector;
-    private readonly RoutingStickiness _stickiness;
     private readonly Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? _fallback;
     private readonly bool _capabilityGate;
-
-    private readonly ConcurrentDictionary<string, ChatRoutePlan>? _planByConversation;
-    private ChatRoutePlan? _instancePlan;
 
     /// <summary>Initializes a new instance of the <see cref="RoutingChatClient"/> class.</summary>
     /// <param name="models">The models to route between. At least one is required, each bound to an <see cref="IChatClient"/>.</param>
     /// <param name="selector">The selection policy, or <see langword="null"/> for the opinion-free default.</param>
-    /// <param name="stickiness">How a routing decision is cached and reused across requests.</param>
     /// <param name="fallback">
     /// An optional fallback policy. After every model in the selected <see cref="ChatRoutePlan"/> has failed,
     /// this delegate receives the route context and the registered models not already in the plan, and returns
@@ -139,26 +119,14 @@ public class RoutingChatClient : IChatClient
     public RoutingChatClient(
         IReadOnlyList<RoutingChatModel> models,
         IChatRouteSelector? selector = null,
-        RoutingStickiness stickiness = RoutingStickiness.EveryCall,
         Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? fallback = null,
         bool capabilityGate = true)
     {
-        if (!Enum.IsDefined(typeof(RoutingStickiness), stickiness))
-        {
-            Throw.ArgumentOutOfRangeException(nameof(stickiness));
-        }
-
         _models = ValidateModels(models);
         _modelList = new ReadOnlyCollection<RoutingChatModel>(_models);
         _selector = selector;
-        _stickiness = stickiness;
         _fallback = fallback;
         _capabilityGate = capabilityGate;
-
-        if (stickiness == RoutingStickiness.ByConversation)
-        {
-            _planByConversation = new(StringComparer.Ordinal);
-        }
     }
 
     /// <inheritdoc/>
@@ -172,8 +140,8 @@ public class RoutingChatClient : IChatClient
         IEnumerable<ChatMessage> normalizedMessages = NormalizeMessages(messages);
         IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
         var context = new ChatRouteContext(normalizedMessages, options, candidates);
-        ChatRoutePlan plan = await GetPlanAsync(context, cancellationToken);
-        RecordDecisionEvent(plan, ResolveConversationKey(context));
+        ChatRoutePlan plan = await RunSelectorAsync(context, cancellationToken);
+        RecordDecisionEvent(plan);
 
         RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
         for (int i = 0; i < ordered.Length; i++)
@@ -217,8 +185,8 @@ public class RoutingChatClient : IChatClient
         IEnumerable<ChatMessage> normalizedMessages = NormalizeMessages(messages);
         IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
         var context = new ChatRouteContext(normalizedMessages, options, candidates);
-        ChatRoutePlan plan = await GetPlanAsync(context, cancellationToken);
-        RecordDecisionEvent(plan, ResolveConversationKey(context));
+        ChatRoutePlan plan = await RunSelectorAsync(context, cancellationToken);
+        RecordDecisionEvent(plan);
 
         RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
         for (int i = 0; i < ordered.Length; i++)
@@ -315,62 +283,6 @@ public class RoutingChatClient : IChatClient
                 }
             }
         }
-    }
-
-    private async ValueTask<ChatRoutePlan> GetPlanAsync(ChatRouteContext context, CancellationToken cancellationToken)
-    {
-        switch (_stickiness)
-        {
-            case RoutingStickiness.PerInstance:
-            {
-                ChatRoutePlan? cached = Volatile.Read(ref _instancePlan);
-                if (cached is not null && await PlanRemainsValidAsync(cached, context, cancellationToken))
-                {
-                    return cached;
-                }
-
-                ChatRoutePlan plan = await RunSelectorAsync(context, cancellationToken);
-                Volatile.Write(ref _instancePlan, plan);
-                return plan;
-            }
-
-            case RoutingStickiness.ByConversation:
-            {
-                string? conversationKey = ResolveConversationKey(context);
-                if (string.IsNullOrWhiteSpace(conversationKey))
-                {
-                    // Without a conversation key there is nothing to scope on; behave like EveryCall.
-                    return await RunSelectorAsync(context, cancellationToken);
-                }
-
-                if (_planByConversation!.TryGetValue(conversationKey!, out ChatRoutePlan? cached) &&
-                    await PlanRemainsValidAsync(cached, context, cancellationToken))
-                {
-                    return cached;
-                }
-
-                ChatRoutePlan plan = await RunSelectorAsync(context, cancellationToken);
-                _planByConversation[conversationKey!] = plan;
-                return plan;
-            }
-
-            default:
-                return await RunSelectorAsync(context, cancellationToken);
-        }
-    }
-
-    // Resolves the key that scopes a ByConversation sticky decision from the caller-owned AdditionalProperties entry.
-    // This is intentionally decoupled from ChatOptions.ConversationId, which is a provider state token (absent for
-    // stateless providers, churns per-turn for some stateful ones) and so unfit as a stickiness key.
-    private static string? ResolveConversationKey(ChatRouteContext context)
-    {
-        if (context.Options?.AdditionalProperties is { } props &&
-            props.TryGetValue(ConversationKeyPropertyName, out object? value))
-        {
-            return value as string;
-        }
-
-        return null;
     }
 
     private ValueTask<ChatRoutePlan> RunSelectorAsync(ChatRouteContext context, CancellationToken cancellationToken) =>
@@ -500,9 +412,6 @@ public class RoutingChatClient : IChatClient
         return result.ToArray();
     }
 
-    private static async ValueTask<bool> PlanRemainsValidAsync(ChatRoutePlan plan, ChatRouteContext context, CancellationToken cancellationToken) =>
-        plan.RemainsValid is null || await plan.RemainsValid(context, cancellationToken);
-
     // The opinion-free default: honor an explicit ModelId, otherwise the first registered model.
     private static ChatRoutePlan DefaultSelectRoute(ChatRouteContext context)
     {
@@ -524,29 +433,15 @@ public class RoutingChatClient : IChatClient
 
     private static ChatOptions? CreateForwardedOptions(RoutingChatModel model, ChatOptions? options)
     {
-        // The router forwards the caller's options, but two routing internals must not ride along to the
-        // provider: the chosen provider model id is supplied only when the caller did not pin one, and the
-        // conversation-key property the router reads for ByConversation stickiness is stripped so it never
-        // reaches the model. Both are applied on a clone, leaving the caller's options untouched.
-        bool setModelId = model.ModelId is not null && options?.ModelId is null;
-        bool stripConversationKey = options?.AdditionalProperties?.ContainsKey(ConversationKeyPropertyName) == true;
-
-        if (!setModelId && !stripConversationKey)
+        // The router forwards the caller's options, supplying the chosen provider model id only when the caller did
+        // not pin one. It is applied on a clone, leaving the caller's options untouched.
+        if (model.ModelId is null || options?.ModelId is not null)
         {
             return options;
         }
 
         ChatOptions forwarded = options?.Clone() ?? new ChatOptions();
-        if (setModelId)
-        {
-            forwarded.ModelId = model.ModelId;
-        }
-
-        if (stripConversationKey)
-        {
-            _ = forwarded.AdditionalProperties!.Remove(ConversationKeyPropertyName);
-        }
-
+        forwarded.ModelId = model.ModelId;
         return forwarded;
     }
 
@@ -624,11 +519,10 @@ public class RoutingChatClient : IChatClient
         _ = activity.AddEvent(new ActivityEvent(AttemptEventName, tags: tags));
     }
 
-    // Adds one routing.decision event to the ambient span describing the selected plan: the primary model, the
-    // conversation key the decision was scoped to (when present), and any decision-rationale the selector attached
-    // (complexity tier, semantic score, ...). Fires once per request — including when a sticky decision is reused —
-    // so the rationale reflects the decision in force. No-op unless a listener is recording the current activity.
-    private static void RecordDecisionEvent(ChatRoutePlan plan, string? conversationKey)
+    // Adds one routing.decision event to the ambient span describing the selected plan: the primary model and any
+    // decision-rationale the selector attached (complexity tier, semantic score, ...). Fires once per request.
+    // No-op unless a listener is recording the current activity.
+    private static void RecordDecisionEvent(ChatRoutePlan plan)
     {
         Activity? activity = Activity.Current;
         if (activity is not { IsAllDataRequested: true })
@@ -640,11 +534,6 @@ public class RoutingChatClient : IChatClient
         {
             [SelectedModelNameKey] = plan.OrderedModels[0].Name,
         };
-
-        if (!string.IsNullOrWhiteSpace(conversationKey))
-        {
-            tags[ConversationKeyPropertyName] = conversationKey;
-        }
 
         if (plan.DecisionMetadata is { } metadata)
         {

@@ -41,7 +41,7 @@ The folder divides cleanly into three groups:
 
 | Group | Files |
 |---|---|
-| **Mechanism** | `RoutingChatClient`, `RoutingChatClientBuilder`, `RoutingStickiness`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
+| **Mechanism** | `RoutingChatClient`, `RoutingChatClientBuilder`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
 | **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan` |
 | **Shipped policies & adapters** | `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `ChatModelCatalog` (+ `ChatModelCatalogOptions`) |
 
@@ -120,11 +120,9 @@ things a bare `RoutingChatModel` cannot:
    tier/model) returns a **one-model plan** and leaves the rest to the router's fallback policy —
    it has no honest ranking of the other models to fabricate. There is a single-model convenience
    constructor for exactly this case.
-2. **A self-invalidation rule.** The optional `RemainsValid` predicate
-   (`Func<ChatRouteContext, CancellationToken, ValueTask<bool>>`) lets a *cached* sticky decision
-   decide it is stale. This is the policy-side complement to `RoutingStickiness` (the mechanism-side
-   caching scope). Example: "stick to this model for the conversation **unless** complexity just
-   jumped." A static return value has nowhere to hang that rule.
+2. **Optional decision metadata.** `DecisionMetadata` lets a selector attach decision-rationale
+   (the complexity tier it classified, the semantic score the winner earned) that the router surfaces
+   as `routing.decision` trace tags. A bare model has nowhere to hang that rationale.
 
 Construction validates a non-empty, non-null model list and defensively copies it into a
 `ReadOnlyCollection`.
@@ -162,30 +160,21 @@ The heart of the feature, and an `IChatClient` itself. Responsibilities, in orde
    disables it entirely. The resulting candidate set feeds both the `ChatRouteContext` the selector sees
    and the fallback chain. Only high-confidence, request-derived signals are used — fuzzy dimensions
    (e.g. "reasoning") are left to the selector.
-3. **Get a plan** (`GetPlanAsync`), honoring the configured `RoutingStickiness`:
-   - `EveryCall` → run the selector every time.
-   - `PerInstance` → run once, cache on the instance (`_instancePlan`, guarded with
-     `Volatile.Read/Write`), reuse for all later requests.
-   - `ByConversation` → cache per **conversation key** (the
-     `RoutingChatClient.ConversationKeyPropertyName` entry in `ChatOptions.AdditionalProperties`,
-     a caller-owned value deliberately decoupled from the provider's `ConversationId`) in a
-     `ConcurrentDictionary`; with no key, transparently behave like `EveryCall`.
-   Before reusing any cached plan it awaits `PlanRemainsValidAsync`, which calls the plan's
-   `RemainsValid` predicate (if any) and re-runs the selector when it returns `false`.
-4. **Run the selector** (`RunSelectorAsync`) — or, when no selector was supplied, the opinion-free
-   `DefaultSelectRoute`: honor `ChatOptions.ModelId` (matched against each model's `ModelId` or
-   `Name`), otherwise the first registered model.
-5. **Build the attempt order** (`BuildAttemptOrder`) — start with `plan.OrderedModels`; if a fallback
+3. **Run the selector** (`RunSelectorAsync`) for every request — or, when no selector was supplied, the
+   opinion-free `DefaultSelectRoute`: honor `ChatOptions.ModelId` (matched against each model's `ModelId`
+   or `Name`), otherwise the first registered model. The router holds no cross-request state; each
+   request is routed from scratch.
+4. **Build the attempt order** (`BuildAttemptOrder`) — start with `plan.OrderedModels`; if a fallback
    policy was configured (`UseFallback`), append the candidate models the plan omitted, in the order
    the policy returns, de-duped so each candidate is tried at most once.
-6. **Invoke with fallback** — walk that attempt order; call `GetResponseAsync` on each model's
+5. **Invoke with fallback** — walk that attempt order; call `GetResponseAsync` on each model's
    `Client`. On exception, the `catch ... when (i < ordered.Length - 1 && !ct.IsCancellationRequested)`
    guard falls through to the next model; the final model's exception propagates. Cancellation is
    never swallowed.
-7. **Forward options carefully** (`CreateForwardedOptions`): the chosen model's provider `ModelId` is
+6. **Forward options carefully** (`CreateForwardedOptions`): the chosen model's provider `ModelId` is
    injected **only** when the caller didn't already pin one, by cloning the options. Routing internals
    are **never** written into the forwarded request — the inner client sees a clean request.
-8. **Stamp the result** (`StampResponse`): write the selected model's name/id/provider into the
+7. **Stamp the result** (`StampResponse`): write the selected model's name/id/provider into the
    response's `AdditionalProperties` (keys `routing.selected_model`, `routing.selected_model_id`,
    `routing.selected_provider`) and tag the current `Activity` for telemetry.
 
@@ -200,7 +189,7 @@ Other details:
   (so middleware can discover the active policy).
 - **Trace events.** Alongside the response stamping, the router records two kinds of `ActivityEvent`
   on `Activity.Current` (each a no-op unless the activity is recording): one `routing.decision`
-  event per request (selected model + conversation key + any selector rationale such as the
+  event per request (selected model + any selector rationale such as the
   complexity tier or semantic score it stamped onto `ChatRoutePlan.DecisionMetadata`), and one
   `routing.attempt` event per model tried (the fallback timeline). It creates no `ActivitySource` of
   its own. Event names are public consts (`RoutingChatClient.DecisionEventName` /
@@ -227,7 +216,6 @@ A small builder that accumulates models and configuration, then `Build()`s a `Ro
 - `UseSelector(...)` — three overloads: an `IChatRouteSelector`, an async delegate, or a sync delegate
   (the latter two route through `ChatRouteSelector.Create`). Passing `null` selects the opinion-free
   default.
-- `UseStickiness(RoutingStickiness)` — set the caching scope.
 - `UseCapabilityGate(bool)` — toggle the router's soft capability gate (on by default).
 
 It's deliberately thin: all real behavior lives in `RoutingChatClient`.
@@ -269,25 +257,6 @@ enum small, factual, and stable as the AI landscape shifts. Traits are intended 
 **capability gate** — "can this model do what the request needs *at all*?" — and not as a proxy for
 quality: most modern chat models share the same flags, so traits cannot rank models on quality.
 
-### `RoutingStickiness.cs` — the caching *scope*
-
-An enum: `EveryCall` (re-decide every request), `PerInstance` (decide once per client instance),
-`ByConversation` (decide once per caller-owned **conversation key** — the
-`RoutingChatClient.ConversationKeyPropertyName` entry in `ChatOptions.AdditionalProperties` —
-falling back to `EveryCall` when absent). The key is intentionally **not** `ChatOptions.ConversationId`,
-which is a provider state token (absent for stateless providers, rewritten per-turn by some stateful
-ones) and so unfit as a stable stickiness key.
-
-Crucially, stickiness is **only the "when do I reuse a cached decision?" half**. The complementary
-"when is a cached decision no longer valid?" half belongs to the *policy* and is expressed by
-`ChatRoutePlan.RemainsValid`. Together they let you say "stick per conversation, but re-route if the
-selector's own validity rule says the situation changed." The two shipped selectors expose that
-invalidation behind one opt-in toggle each — `ComplexityRouterOptions.EscalateOnComplexity` (an
-escalation ratchet that re-routes only when a later turn is strictly more complex) and
-`SemanticRouterOptions.ReselectBelowThreshold` (a confidence floor that re-routes once the pinned
-model drifts below its score threshold) — both off by default, both effective only under a sticky
-scope. See [routing-chat-client.md](routing-chat-client.md).
-
 ---
 
 ## The shipped policies
@@ -316,9 +285,6 @@ utterances are most cosine-similar, using the same algorithm LiteLLM does.
 
 This is the heavier, "understands intent" policy — appropriate when keyword rules are too brittle.
 Tune it with `SemanticRouterOptions` (`TopK`, `Aggregation`, `ScoreThreshold`, `ScoreThresholdByModel`).
-Set `ReselectBelowThreshold = true` to make a sticky decision adaptive: the selector attaches a
-confidence floor (`RemainsValid`) that re-embeds each later turn and re-routes once the pinned model
-drifts below its score threshold, reusing the existing threshold as the single knob.
 
 ### `ComplexityChatRouteSelector.cs` (+ `ComplexityRouterOptions.cs`, `ChatComplexityTier.cs`)
 
@@ -357,10 +323,6 @@ token count, and question count read the user message only. (The full scoring ta
 worked example are in [`routing-chat-client.md`](./routing-chat-client.md#how-litellms-complexity-router-works-and-how-this-port-mirrors-it).)
 
 `ClassifyTier(messages)` is public so callers can get the tier without routing (no-user ⇒ `Medium`).
-Set `EscalateOnComplexity = true` to make a sticky decision adaptive: the selector attaches an
-escalation ratchet (`RemainsValid`) that reuses the cached decision while later turns classify at or
-below the pinned tier and re-routes only when one classifies strictly higher — routing up to a
-stronger model on a genuine jump in difficulty without flapping down on a trivial follow-up.
 
 ### `ChatModelCatalog.cs` (+ `ChatModelCatalogOptions.cs`) — the catalog adapter
 
@@ -407,10 +369,6 @@ each mechanism guarantee:
   rejects duplicate model names.
 - **Default selector:** forwards the model id, stamps the response, and crucially **does not leak**
   routing internals into the forwarded request; honors an explicit `ChatOptions.ModelId`.
-- **Stickiness:** `PerInstance` reuses the first selected model; `ByConversation` sticks per
-  conversation key and falls back to `EveryCall` without one; `RemainsValid` causes a sticky
-  hit to be reused *and* re-selected once invalidated (the policy-side invalidation half), including
-  the selectors' built-in `EscalateOnComplexity` ratchet and `ReselectBelowThreshold` floor.
 - **Fallback:** walks the plan on failure and stamps the model that actually succeeded; propagates the
   last exception when the chain is exhausted; throws when a selector routes to an unregistered model.
 - **Streaming:** stamps only the first update; falls back before the first update is produced.
@@ -453,8 +411,8 @@ and stream parity; and rejects a non-array root. A final cross-catalog test prov
 ## Mental model, in one line
 
 **The mechanism is dumb and stable; the policy is smart and replaceable.** `RoutingChatClient` gives
-you composition (nesting + middleware), fallback, stickiness, and response stamping for free;
+you composition (nesting + middleware), fallback, and response stamping for free;
 `IChatRouteSelector` supplies the judgment — whether that's the empty default, one of the shipped
 experimental selectors, or your own lambda. `ChatRoutePlan` exists because a routing decision is
-*ordered preference + an invalidation rule*, not just a single model; and when a selector picks one
+*ordered preference*, not just a single model; and when a selector picks one
 model, the router's own `UseFallback` policy owns the order in which the remaining models are tried.

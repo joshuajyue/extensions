@@ -17,7 +17,6 @@ public sealed class RoutingChatClientBuilder
 {
     private readonly List<RoutingChatModel> _models = [];
     private IChatRouteSelector? _selector;
-    private RoutingStickiness _stickiness = RoutingStickiness.EveryCall;
     private Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? _fallback;
     private bool _capabilityGate = true;
 
@@ -147,21 +146,6 @@ public sealed class RoutingChatClientBuilder
     public RoutingChatClientBuilder UseSelector(Func<ChatRouteContext, ChatRoutePlan> selector) =>
         UseSelector(ChatRouteSelector.Create(selector));
 
-    /// <summary>Sets how a routing decision is cached and reused across requests.</summary>
-    /// <param name="stickiness">The stickiness scope.</param>
-    /// <returns>The current builder.</returns>
-    /// <remarks>
-    /// For <see cref="RoutingStickiness.ByConversation"/>, scope a sticky decision by setting the
-    /// <see cref="RoutingChatClient.ConversationKeyPropertyName"/> entry in <see cref="ChatOptions.AdditionalProperties"/>
-    /// to a stable, caller-owned value (for example a GUID minted once per chat). When no key is present, the request
-    /// falls back to <see cref="RoutingStickiness.EveryCall"/>.
-    /// </remarks>
-    public RoutingChatClientBuilder UseStickiness(RoutingStickiness stickiness)
-    {
-        _stickiness = stickiness;
-        return this;
-    }
-
     /// <summary>Enables fallback over the registered models a selector's plan omitted, in registration order.</summary>
     /// <returns>The current builder.</returns>
     /// <remarks>
@@ -211,5 +195,5 @@ public sealed class RoutingChatClientBuilder
 
     /// <summary>Builds a <see cref="RoutingChatClient"/>.</summary>
     /// <returns>A routing chat client.</returns>
-    public RoutingChatClient Build() => new(_models, _selector, _stickiness, _fallback, _capabilityGate);
+    public RoutingChatClient Build() => new(_models, _selector, _fallback, _capabilityGate);
 }
