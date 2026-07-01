@@ -157,11 +157,12 @@ var selector = new SemanticChatRouteSelector(
         ScoreThreshold = 0.3f,                    // matches the LiteLLM integration default
     });
 
-IChatClient router = new RoutingChatClientBuilder()
-    .AddModel("openai:gpt-4o-mini", gpt4oMiniClient, modelId: "gpt-4o-mini")
-    .AddModel("openai:gpt-5.3", gpt53Client, modelId: "gpt-5.3")
-    .UseSelector(selector)
-    .Build();
+IChatClient router = new RoutingChatClient(
+[
+    new RoutingChatModel("openai:gpt-4o-mini", modelId: "gpt-4o-mini", client: gpt4oMiniClient),
+    new RoutingChatModel("openai:gpt-5.3", modelId: "gpt-5.3", client: gpt53Client),
+],
+    selector: selector);
 ```
 
 The selector depends only on `IEmbeddingGenerator<string, Embedding<float>>`, so it works with

@@ -3,7 +3,7 @@
 This document explains the `ChatRouting` feature (namespace `Microsoft.Extensions.AI`) **file by file**.
 The types live in three homes: the policy seam and model metadata types are part of the core
 `Microsoft.Extensions.AI.Abstractions` package; the mechanism
-(`RoutingChatClient`/`RoutingChatClientBuilder`) is part of the core `Microsoft.Extensions.AI`
+(`RoutingChatClient`) is part of the core `Microsoft.Extensions.AI`
 package; and the in-house concrete selectors (`ComplexityChatRouteSelector`,
 `SemanticChatRouteSelector`) ship separately in the experimental `Microsoft.Extensions.AI.Routing`
 package. The dependency arrow points one way: the selectors package references the core abstractions,
@@ -52,7 +52,7 @@ The folder divides cleanly into three groups:
 
 | Group | Files |
 |---|---|
-| **Mechanism** | `RoutingChatClient`, `RoutingChatClientBuilder`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
+| **Mechanism** | `RoutingChatClient`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
 | **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan` |
 | **Shipped policies** | `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`) |
 
@@ -104,9 +104,9 @@ Internally it wraps the delegate in a private `DelegatingChatRouteSelector`. Con
 So the capability comparison is *not* "`ChatRouteSelector` vs `ComplexityChatRouteSelector`." It's:
 a **pre-built appliance** (a concrete selector with domain logic baked in) vs. a **bring-your-own-
 function adapter** (`ChatRouteSelector.Create`, whose capability is exactly whatever your lambda
-does). Both produce the same `IChatRouteSelector`. `RoutingChatClientBuilder.UseSelector` has
-overloads for the interface *and* for raw delegates, so the two paths are interchangeable at the call
-site.
+does). Both produce the same `IChatRouteSelector`. The router's `selector` constructor parameter
+accepts an `IChatRouteSelector`; wrap a raw delegate with `ChatRouteSelector.Create` first, so the
+two paths are interchangeable at the call site.
 
 ### `ChatRouteContext.cs` — the selector's input
 
@@ -147,20 +147,20 @@ Fallback is split across the same mechanism/policy line as selection:
 - **The plan tail is policy.** When a selector *has* a real ranking, it expresses fallback by
   returning more than one model. The mechanism never reorders the plan; it just walks it.
 - **The fallback policy is mechanism.** A one-model plan has no tail, so to give single-model
-  selectors resilience the **router** owns an optional fallback policy, configured with
-  `RoutingChatClientBuilder.UseFallback()`. After the plan's models are exhausted, the policy
+  selectors resilience the **router** owns an optional fallback policy, supplied through the
+  `fallback` constructor parameter. After the plan's models are exhausted, the policy
   receives the route context and the registered models the plan omitted, and returns the order in
-  which to try them. The parameterless overload uses registration order (zero opinion about
-  fitness — it's literally the order you registered); the delegate overload lets the consumer order
-  the tail (for example cheapest-first). When no policy is configured, the router only attempts the
-  plan's models. This keeps the mechanism opinion-free by default while letting a complexity
+  which to try them. Returning them unchanged uses registration order (zero opinion about
+  fitness — it's literally the order you registered); returning a reordered list lets the consumer
+  order the tail (for example cheapest-first). When `fallback` is `null`, the router only attempts
+  the plan's models. This keeps the mechanism opinion-free by default while letting a complexity
   classifier stay out of the fallback business entirely.
 
 ---
 
 ## The mechanism
 
-*Part of the core `Microsoft.Extensions.AI` package (`RoutingChatClient`, `RoutingChatClientBuilder`).
+*Part of the core `Microsoft.Extensions.AI` package (`RoutingChatClient`).
 The model-metadata types that follow — `RoutingChatModel`, `RoutingChatModelCatalog`,
 `RoutingChatModelTraits` — are the router's input vocabulary and therefore live alongside the policy
 seam in `Microsoft.Extensions.AI.Abstractions`.*
@@ -222,21 +222,23 @@ The class is `public` and non-sealed with a `virtual GetService`/`Dispose(bool)`
 subclass; the `#pragma warning disable SA1204` at the top is because the static helpers are
 intermixed with instance members for readability.
 
-### `RoutingChatClientBuilder.cs` — fluent assembly
+### Construction — a plain public constructor
 
-A small builder that accumulates models and configuration, then `Build()`s a `RoutingChatClient`:
+There is no routing-specific builder: `RoutingChatClient` is constructed directly through its
+public constructor and composes with the existing `AddChatClient` / `ChatClientBuilder`
+infrastructure like any other `IChatClient`. The constructor takes:
 
-- `AddModel(name, client, ...)` — add a custom model with inline metadata.
-- `AddModel(RoutingChatModel entry, IChatClient client)` / `AddModel(entry)` — add from an existing
-  (metadata-only or already-bound) model. Duplicate names are rejected (case-insensitive).
-- `AddFromCatalog(name, client)` / `AddFromCatalog(catalog, name, client)` — pull metadata from a
-  `RoutingChatModelCatalog` and bind a client.
-- `UseSelector(...)` — three overloads: an `IChatRouteSelector`, an async delegate, or a sync delegate
-  (the latter two route through `ChatRouteSelector.Create`). Passing `null` selects the opinion-free
-  default.
-- `UseCapabilityGate(bool)` — toggle the router's soft capability gate (on by default).
+- `models` — the candidate `RoutingChatModel`s, each bound to an `IChatClient`. It validates the
+  list is non-empty, that every model carries a client, and that names are unique (case-insensitive).
+- `selector` — the selection policy, or `null` for the opinion-free default. Wrap a raw delegate
+  with `ChatRouteSelector.Create` to pass a lambda here.
+- `fallback` — the optional post-plan fallback policy (see [Fallback](#fallback) above); `null`
+  disables it.
+- `capabilityGate` — toggles the router's soft capability gate (on by default).
 
-It's deliberately thin: all real behavior lives in `RoutingChatClient`.
+All real behavior lives in `RoutingChatClient` itself; there is no separate assembly step. Bind
+catalog metadata to a client with `RoutingChatModel.WithClient(client)` (or
+`RoutingChatModelCatalog.CreateModel(name, client)`) when composing the `models` list.
 
 ### `RoutingChatModel.cs` — a candidate's metadata + (optional) client
 

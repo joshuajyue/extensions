@@ -32,7 +32,7 @@ namespace Microsoft.Extensions.AI;
 /// <see cref="RoutingChatModel.Name"/>). When a tier has no mapping, the optional default model is
 /// used. A complexity classifier picks exactly one model, so the produced <see cref="ChatRoutePlan"/>
 /// contains just that model: it has no meaningful ranking of the other models to offer as fallbacks.
-/// Configure fallback on the router instead (see <c>RoutingChatClientBuilder.UseFallback()</c>),
+/// Configure fallback on the router instead (see the router's <c>fallback</c> policy),
 /// which owns failure handling. Tune the scoring with <see cref="ComplexityRouterOptions"/>.
 /// </para>
 /// </remarks>

@@ -162,12 +162,13 @@ public class RoutingChatClientTests
         // The selector picks a single model; the router owns fallback over the remaining models.
         IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models[0]));
 
-        using RoutingChatClient client = new RoutingChatClientBuilder()
-            .AddModel("primary", failing)
-            .AddModel("fallback", working)
-            .UseSelector(selector)
-            .UseFallback()
-            .Build();
+        using RoutingChatClient client = new RoutingChatClient(
+            [
+                new RoutingChatModel("primary", client: failing),
+                new RoutingChatModel("fallback", client: working),
+            ],
+            selector: selector,
+            fallback: static (_, remaining) => remaining);
 
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
 
@@ -430,14 +431,13 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task Builder_BuildsRoutingClient()
+    public async Task Constructor_BuildsRoutingClient()
     {
         var expected = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
         using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(expected) };
 
-        using RoutingChatClient client = new RoutingChatClientBuilder()
-            .AddModel("m1", inner, modelId: "x")
-            .Build();
+        using RoutingChatClient client = new RoutingChatClient(
+            [new RoutingChatModel("m1", modelId: "x", client: inner)]);
 
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
 
@@ -446,13 +446,15 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public void Builder_RejectsDuplicateModelNames()
+    public void Constructor_RejectsDuplicateModelNames()
     {
         using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
 
-        var builder = new RoutingChatClientBuilder().AddModel("dup", inner);
-
-        Assert.Throws<ArgumentException>(() => builder.AddModel("dup", inner));
+        Assert.Throws<ArgumentException>(() => new RoutingChatClient(
+            [
+                new RoutingChatModel("dup", client: inner),
+                new RoutingChatModel("dup", client: inner),
+            ]));
     }
 
     [Fact]
@@ -529,11 +531,12 @@ public class RoutingChatClientTests
         using var vision = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
 
         // Bypass the gate: the default selector pins to Models[0] even though it lacks Vision.
-        using var client = new RoutingChatClientBuilder()
-            .AddModel("plain", plain)
-            .AddModel("vision", vision, traits: RoutingChatModelTraits.Vision)
-            .UseCapabilityGate(false)
-            .Build();
+        using var client = new RoutingChatClient(
+            [
+                new RoutingChatModel("plain", client: plain),
+                new RoutingChatModel("vision", traits: RoutingChatModelTraits.Vision, client: vision),
+            ],
+            capabilityGate: false);
 
         var message = new ChatMessage(ChatRole.User, [new DataContent(new byte[] { 1, 2, 3 }, "image/png")]);
         ChatResponse response = await client.GetResponseAsync([message]);

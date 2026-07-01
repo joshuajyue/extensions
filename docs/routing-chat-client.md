@@ -3,8 +3,8 @@
 > `RoutingChatClient` and its selectors are experimental (`MEAI001`), all in the
 > `Microsoft.Extensions.AI` namespace. The selection-policy seam (`IChatRouteSelector`,
 > `ChatRouteContext`, `ChatRoutePlan`) and the model metadata types ship in the core
-> `Microsoft.Extensions.AI.Abstractions` package; the mechanism (`RoutingChatClient`,
-> `RoutingChatClientBuilder`) ships in the core `Microsoft.Extensions.AI` package. The in-house
+> `Microsoft.Extensions.AI.Abstractions` package; the mechanism (`RoutingChatClient`) ships in the
+> core `Microsoft.Extensions.AI` package. The in-house
 > concrete selectors (`ComplexityChatRouteSelector`, `SemanticChatRouteSelector`) ship separately in
 > the experimental `Microsoft.Extensions.AI.Routing` package.
 
@@ -75,11 +75,16 @@ The gate is **soft** in two ways:
 - **Fallthrough:** if no registered model positively declares a required capability (sparse or
   incorrect trait metadata), the gate returns the full candidate set rather than stranding the
   request. A model only gets excluded when at least one *other* model declares the capability.
-- **Bypass:** `RoutingChatClientBuilder.UseCapabilityGate(false)` disables it globally for the
+- **Bypass:** the `capabilityGate: false` constructor argument disables it globally for the
   router (it is on by default). Use this when you don't trust the catalog's trait metadata and
   want the selector/`ModelId` to have the final say.
 
 ## Building a router
+
+`RoutingChatClient` is a plain `IChatClient`: construct it directly with the models it should
+route between, then layer cross-cutting middleware exactly as you would over any other client.
+There is **no** routing-specific builder — the router composes with the existing `AddChatClient`
+/ `ChatClientBuilder` infrastructure.
 
 ```csharp
 using Microsoft.Extensions.AI;
@@ -89,6 +94,7 @@ IChatClient gpt53Client = ...;
 IChatClient gpt4oMiniClient = ...;
 IChatClient privateModelClient = ...;
 
+// Optional: a catalog of reusable model metadata you can bind to clients later.
 var catalog = new RoutingChatModelCatalog(
 [
     new RoutingChatModel(
@@ -108,20 +114,22 @@ var catalog = new RoutingChatModelCatalog(
         typicalLatency: TimeSpan.FromMilliseconds(400)),
 ]);
 
-IChatClient root = new RoutingChatClientBuilder(catalog)
-    .AddFromCatalog("openai:gpt-5.3", gpt53Client)
-    .AddFromCatalog("openai:gpt-4o-mini", gpt4oMiniClient)
-    .AddModel(
+// Bind catalog metadata to a client with WithClient; declare ad-hoc models inline (client last).
+IChatClient root = new RoutingChatClient(
+[
+    catalog.Get("openai:gpt-5.3").WithClient(gpt53Client),
+    catalog.Get("openai:gpt-4o-mini").WithClient(gpt4oMiniClient),
+    new RoutingChatModel(
         name: "private-fast-model",
-        client: privateModelClient,
         providerName: "contoso",
         modelId: "contoso-fast",
         inputTokenCostPerMillion: 1,
         outputTokenCostPerMillion: 2,
-        typicalLatency: TimeSpan.FromMilliseconds(250))
-    .Build();
+        typicalLatency: TimeSpan.FromMilliseconds(250),
+        client: privateModelClient),
+]);
 
-// Cross-cutting middleware is layered after the routing root is created.
+// Cross-cutting middleware layers over the router like any other IChatClient.
 IChatClient client = root
     .AsBuilder()
     .UseFunctionInvocation()
@@ -131,7 +139,21 @@ IChatClient client = root
 var response = await client.GetResponseAsync(messages);
 ```
 
-The user-facing noun is **"model"** (`AddModel`). A `RoutingChatModel` carries optional
+To register the router in DI, hand the same construction to `AddChatClient` and layer middleware
+with the standard builder — no routing-specific registration helper is required:
+
+```csharp
+services.AddChatClient(sp => new RoutingChatClient(
+[
+    new RoutingChatModel("openai:gpt-5.3", client: sp.GetRequiredKeyedService<IChatClient>("gpt-5.3")),
+    new RoutingChatModel("openai:gpt-4o-mini", client: sp.GetRequiredKeyedService<IChatClient>("gpt-4o-mini")),
+]))
+    .UseFunctionInvocation()
+    .UseOpenTelemetry();
+```
+
+
+The user-facing noun is **"model"** (`RoutingChatModel`). A `RoutingChatModel` carries optional
 **objective** metadata only — stable name, provider, model id, capability traits (`ToolCalling`,
 `Vision`, `Reasoning` — each readable straight from a provider catalog), input/output token
 cost, a context-window hint (`MaxInputTokens`), a latency hint, source URL, and update time. The
@@ -175,11 +197,14 @@ Built-in, experimental policies:
   routing algorithm (the same library LiteLLM's "auto router" delegates to); embedding-based, see
   [semantic-chat-client-selection.md](semantic-chat-client-selection.md).
 
-Inline delegates are supported via the builder:
+Inline delegates are supported by wrapping them with `ChatRouteSelector.Create` and passing the
+result as the router's `selector`:
 
 ```csharp
-builder.UseSelector(ctx => new ChatRoutePlan(ctx.Models[0]));                  // sync
-builder.UseSelector((ctx, ct) => SomeAsyncSelectionAsync(ctx, ct));           // async
+IChatRouteSelector sync  = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models[0]));       // sync
+IChatRouteSelector async = ChatRouteSelector.Create((ctx, ct) => SomeAsyncSelectionAsync(ctx, ct)); // async
+
+var router = new RoutingChatClient(models, selector: sync);
 ```
 
 A selector must route to one of the **registered** model instances; routing to an unknown
@@ -208,7 +233,8 @@ var selector = new ComplexityChatRouteSelector(
     },
     defaultModel: "gpt-4o");
 
-builder.UseSelector(selector);
+// Pass it as the router's selector:
+var router = new RoutingChatClient(models, selector: selector);
 ```
 
 ### How the complexity router works
@@ -344,24 +370,24 @@ Fallback is split across the mechanism/policy line, mirroring selection itself:
   descending similarity) emits a multi-model plan whose tail *is* a meaningful fallback chain.
 - **The fallback policy (router).** A selector that naturally picks a single model — a complexity
   classifier maps each request to exactly one tier/model — has no honest ranking of the *other*
-  models to offer, so it returns a one-model plan. To give such a selector resilience, configure a
-  fallback policy on the router with `RoutingChatClientBuilder.UseFallback()`. After the plan's
-  models are exhausted, the policy decides the order in which the remaining registered models are
-  tried. The parameterless overload uses registration order; the delegate overload
-  (`UseFallback((context, remaining) => ...)`) lets you order the tail however you like (for
-  example, cheapest-first). When no fallback policy is set, the router only attempts the plan's
-  models.
+  models to offer, so it returns a one-model plan. To give such a selector resilience, supply a
+  fallback policy to the router's `fallback` constructor parameter. After the plan's models are
+  exhausted, the policy decides the order in which the remaining registered models are tried.
+  Returning them unchanged (`(_, remaining) => remaining`) uses registration order; return them in
+  any order you like (for example, cheapest-first) to control the tail. When `fallback` is `null`,
+  the router only attempts the plan's models.
 
 The exception of the **last** attempted model propagates. The model that ultimately succeeds is
 the one stamped on the response.
 
 ```csharp
-RoutingChatClient client = new RoutingChatClientBuilder()
-    .AddModel("fast", fastClient)
-    .AddModel("smart", smartClient)
-    .UseSelector(new ComplexityChatRouteSelector(tierMap)) // picks one model
-    .UseFallback()                                         // router tries the rest in registration order
-    .Build();
+RoutingChatClient client = new RoutingChatClient(
+[
+    new RoutingChatModel("fast", client: fastClient),
+    new RoutingChatModel("smart", client: smartClient),
+],
+    selector: new ComplexityChatRouteSelector(tierMap), // picks one model
+    fallback: (_, remaining) => remaining);             // router tries the rest in registration order
 ```
 
 **Streaming caveat:** fallback applies only *before the first update is yielded*. Once a

@@ -37,12 +37,12 @@ namespace Microsoft.Extensions.AI;
 /// <see cref="RoutingChatModelTraits.ToolCalling"/>). This is a correctness filter shared by every selector
 /// and the fallback chain — not a quality signal. It is soft: when no registered model declares a required
 /// capability, the gate falls through to the full set rather than stranding the request, and it can be
-/// bypassed entirely via <see cref="RoutingChatClientBuilder.UseCapabilityGate(bool)"/>.
+/// bypassed entirely via the <c>capabilityGate</c> constructor parameter.
 /// </para>
 /// <para>
 /// A selector returns a <see cref="ChatRoutePlan"/> of the models it prefers, primary first. The router
-/// attempts those in order; if every model in the plan fails, an optional <em>fallback policy</em> (a
-/// delegate supplied via the constructor or <see cref="RoutingChatClientBuilder.UseFallback()"/>) decides
+/// attempts those in order; if every model in the plan fails, an optional <em>fallback policy</em> (the
+/// <c>fallback</c> constructor parameter) decides
 /// the order in which any remaining candidate models are tried. This lets a selector that naturally picks
 /// a single model (for example a complexity classifier) stay out of the fallback business: it returns just
 /// its primary, and the router owns failure handling.
@@ -584,6 +584,14 @@ public class RoutingChatClient : IChatClient
             if (result[i].Client is null)
             {
                 Throw.ArgumentException(nameof(models), $"The model '{result[i].Name}' must be bound to an IChatClient.");
+            }
+
+            for (int j = 0; j < i; j++)
+            {
+                if (StringComparer.OrdinalIgnoreCase.Equals(result[j].Name, result[i].Name))
+                {
+                    Throw.ArgumentException(nameof(models), $"A model named '{result[i].Name}' has already been added.");
+                }
             }
         }
 

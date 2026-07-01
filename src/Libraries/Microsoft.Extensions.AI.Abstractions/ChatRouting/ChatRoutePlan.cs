@@ -13,8 +13,8 @@ namespace Microsoft.Extensions.AI;
 /// <remarks>
 /// A plan is the ordered list of models the selector prefers: the first is the primary, and any remaining
 /// models are fallbacks the router tries in order if an attempt fails. A selector that naturally picks a
-/// single model may return a one-model plan and leave fallback to the router (see
-/// <c>RoutingChatClientBuilder.UseFallback()</c>).
+/// single model may return a one-model plan and leave fallback to the router (see the router's
+/// <c>fallback</c> policy).
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public sealed class ChatRoutePlan
