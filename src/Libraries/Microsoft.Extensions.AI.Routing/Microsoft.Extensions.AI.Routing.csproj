@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Microsoft.Extensions.AI</RootNamespace>
+    <Description>In-house routing selectors for Microsoft.Extensions.AI: a complexity-tier selector and an embedding-based semantic selector that plug into RoutingChatClient via IChatRouteSelector.</Description>
+    <Workstream>AI</Workstream>
+    <ForceLatestDotnetVersions>true</ForceLatestDotnetVersions>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Stage>normal</Stage>
+    <EnablePackageValidation>false</EnablePackageValidation>
+    <MinCodeCoverage>75</MinCodeCoverage>
+    <MinMutationScore>50</MinMutationScore>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <TargetFrameworks>$(TargetFrameworks);netstandard2.0</TargetFrameworks>
+    <NoWarn>$(NoWarn);MEAI001</NoWarn>
+
+    <!-- CA2007 requires use of ConfigureAwait. Like the core Microsoft.Extensions.AI library, the semantic selector
+         awaits an inner IEmbeddingGenerator call that may run user code caring about SynchronizationContext, so it
+         deliberately avoids ConfigureAwait(false). -->
+    <NoWarn>$(NoWarn);CA2007</NoWarn>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <DisableMinimumSupportedTfmCompatErrors>true</DisableMinimumSupportedTfmCompatErrors>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <InjectExperimentalAttributeOnLegacy>true</InjectExperimentalAttributeOnLegacy>
+    <InjectSharedDiagnosticIds>true</InjectSharedDiagnosticIds>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Numerics.Tensors" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Microsoft.Extensions.AI.Abstractions\Microsoft.Extensions.AI.Abstractions.csproj" />
+  </ItemGroup>
+
+</Project>

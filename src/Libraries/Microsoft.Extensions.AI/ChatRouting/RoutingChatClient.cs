@@ -498,7 +498,7 @@ public class RoutingChatClient : IChatClient
             [AttemptOrdinalKey] = ordinal,
             [AttemptModelKey] = model.Name,
             [AttemptOutcomeKey] = outcome,
-            [AttemptDurationMsKey] = FunctionInvocationHelpers.GetElapsedTime(startTimestamp).TotalMilliseconds,
+            [AttemptDurationMsKey] = GetElapsedTime(startTimestamp).TotalMilliseconds,
         };
 
         if (model.ModelId is not null)
@@ -518,6 +518,14 @@ public class RoutingChatClient : IChatClient
 
         _ = activity.AddEvent(new ActivityEvent(AttemptEventName, tags: tags));
     }
+
+    // Elapsed time since a Stopwatch.GetTimestamp() reading, using the framework helper where available.
+    private static TimeSpan GetElapsedTime(long startingTimestamp) =>
+#if NET
+        Stopwatch.GetElapsedTime(startingTimestamp);
+#else
+        new((long)((Stopwatch.GetTimestamp() - startingTimestamp) * ((double)TimeSpan.TicksPerSecond / Stopwatch.Frequency)));
+#endif
 
     // Adds one routing.decision event to the ambient span describing the selected plan: the primary model and any
     // decision-rationale the selector attached (complexity tier, semantic score, ...). Fires once per request.

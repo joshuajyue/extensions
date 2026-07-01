@@ -14,14 +14,15 @@ using Microsoft.Shared.Diagnostics;
 namespace Microsoft.Extensions.AI;
 
 /// <summary>
-/// An embedding-based selection policy that mirrors the LiteLLM "auto router" (its semantic router):
+/// An embedding-based selection policy implementing the routing approach of Aurelio Labs' semantic-router
+/// (the same algorithm LiteLLM's "auto router" delegates to):
 /// each model is described by a small set of representative "utterances", and a request is routed to
 /// the model whose utterances are most semantically similar to the last user message.
 /// </summary>
 /// <remarks>
 /// <para>
-/// This is a faithful port of LiteLLM's semantic router (which delegates the routing math to the
-/// <c>semantic-router</c> library), using any <see cref="IEmbeddingGenerator{TInput, TEmbedding}"/> as
+/// This implements the routing math of Aurelio Labs' <c>semantic-router</c> (the library that LiteLLM's
+/// "auto router" delegates to), using any <see cref="IEmbeddingGenerator{TInput, TEmbedding}"/> as
 /// the embedding backend. For each request it: embeds the last user message; computes cosine similarity
 /// against every profile utterance; keeps the globally highest <see cref="SemanticRouterOptions.TopK"/>
 /// matches; groups those matches by model; combines each model's matched scores with

@@ -1,6 +1,13 @@
 # Chat Routing — architecture deep dive
 
-This document explains the `ChatRouting` feature in `Microsoft.Extensions.AI` **file by file**.
+This document explains the `ChatRouting` feature (namespace `Microsoft.Extensions.AI`) **file by file**.
+The types live in three homes: the policy seam and model metadata types are part of the core
+`Microsoft.Extensions.AI.Abstractions` package; the mechanism
+(`RoutingChatClient`/`RoutingChatClientBuilder`) is part of the core `Microsoft.Extensions.AI`
+package; and the in-house concrete selectors (`ComplexityChatRouteSelector`,
+`SemanticChatRouteSelector`) ship separately in the experimental `Microsoft.Extensions.AI.Routing`
+package. The dependency arrow points one way: the selectors package references the core abstractions,
+never the other way around.
 It is a companion to [`routing-chat-client.md`](./routing-chat-client.md) (which is the user-facing
 how-to) and [`semantic-chat-client-selection.md`](./semantic-chat-client-selection.md). Here the goal
 is to explain *why each type exists* and *how the pieces fit together*, in enough depth that a new
@@ -8,6 +15,10 @@ contributor can reason about — and safely extend — the design.
 
 > All public types in this folder are marked `[Experimental(AIRoutingChat)]` (diagnostic id
 > `MEAI001`). The shape may change before it stabilizes.
+
+Algorithm attribution: the complexity selector follows ClawRouter's approach, and the semantic
+selector implements Aurelio Labs' `semantic-router` algorithm. Both are MIT-licensed; see
+[`THIRD-PARTY-NOTICES.TXT`](../THIRD-PARTY-NOTICES.TXT).
 
 ---
 
@@ -43,11 +54,13 @@ The folder divides cleanly into three groups:
 |---|---|
 | **Mechanism** | `RoutingChatClient`, `RoutingChatClientBuilder`, `RoutingChatModel`, `RoutingChatModelCatalog`, `RoutingChatModelTraits` |
 | **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan` |
-| **Shipped policies & adapters** | `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`), `ChatModelCatalog` (+ `ChatModelCatalogOptions`) |
+| **Shipped policies** | `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`) |
 
 ---
 
 ## The policy contract
+
+*Part of the core `Microsoft.Extensions.AI.Abstractions` package.*
 
 ### `IChatRouteSelector.cs`
 
@@ -147,6 +160,11 @@ Fallback is split across the same mechanism/policy line as selection:
 
 ## The mechanism
 
+*Part of the core `Microsoft.Extensions.AI` package (`RoutingChatClient`, `RoutingChatClientBuilder`).
+The model-metadata types that follow — `RoutingChatModel`, `RoutingChatModelCatalog`,
+`RoutingChatModelTraits` — are the router's input vocabulary and therefore live alongside the policy
+seam in `Microsoft.Extensions.AI.Abstractions`.*
+
 ### `RoutingChatClient.cs` — the orchestrator
 
 The heart of the feature, and an `IChatClient` itself. Responsibilities, in order of a request:
@@ -242,7 +260,7 @@ Two things make this design work:
 A case-insensitive dictionary of metadata-only `RoutingChatModel` entries. `Get`/`TryGet` look up by
 name; `CreateModel(name, client)` is sugar for `Get(name).WithClient(client)`. Duplicate names are
 rejected at construction. This is the durable store of "models we know about," decoupled from any
-client — you refresh it (e.g. from a LiteLLM snapshot) independently of wiring up clients.
+client — you refresh it (e.g. from a provider catalog snapshot) independently of wiring up clients.
 
 ### `RoutingChatModelTraits.cs` — objective capability flags only
 
@@ -261,25 +279,27 @@ quality: most modern chat models share the same flags, so traits cannot rank mod
 
 ## The shipped policies
 
+*The experimental `Microsoft.Extensions.AI.Routing` package — the in-house selector sandbox.*
+
 ### `SemanticChatRouteSelector.cs` (+ `SemanticRouterOptions.cs`, `SemanticRouteAggregation.cs`) — embedding-based routing
 
-A **faithful port of LiteLLM's "auto router" (its semantic router)**, which delegates its routing math
-to the `semantic-router` library. Each model is described by a few representative "utterances" (a
-profile). At request time it embeds the last user message and routes to the model whose profile
-utterances are most cosine-similar, using the same algorithm LiteLLM does.
+A .NET implementation of Aurelio Labs' `semantic-router` routing algorithm (the same library
+LiteLLM's "auto router" delegates to). Each model is described by a few representative "utterances"
+(a profile). At request time it embeds the last user message and routes to the model whose profile
+utterances are most cosine-similar.
 
 - Profiles are embedded **once**, lazily, and cached (`EnsureProfilesAsync` + a double-checked lock on
   `_profilesTask`) into a flat index (each utterance vector tagged with its model). A faulted/canceled
   embedding task is **not** cached, so the next call retries.
-- Per request: embed the last **user** message (no fallback to other roles, matching LiteLLM's
-  `_extract_text_from_messages`); score every utterance with `TensorPrimitives.CosineSimilarity`; keep
+- Per request: embed the last **user** message (no fallback to other roles, matching the semantic
+  router's input scope); score every utterance with `TensorPrimitives.CosineSimilarity`; keep
   the globally highest **`TopK`** matches (default `5`); group those by model; combine each model's
   matched scores with **`Aggregation`** (`Mean` by default, or `Sum`/`Max`).
 - **Threshold gate.** In descending aggregated-score order, route to the first model whose score meets
   its threshold — a per-model override (`ScoreThresholdByModel`, mirroring `semantic-router`'s per-route
-  `score_threshold`) if present, else the global **`ScoreThreshold`** (default `0.3`, LiteLLM's default
-  encoder threshold). If none pass — or the request has no user text — the optional **`defaultModel`**
-  (else the first registered model) becomes the primary route.
+  `score_threshold`) if present, else the global **`ScoreThreshold`** (default `0.3`, matching the
+  LiteLLM integration default). If none pass — or the request has no user text — the optional
+  **`defaultModel`** (else the first registered model) becomes the primary route.
 - The plan ranks all models: primary first, then the rest by descending aggregated score. Wrap the
   injected `IEmbeddingGenerator` with caching to amortize the per-request query embedding.
 
@@ -288,76 +308,47 @@ Tune it with `SemanticRouterOptions` (`TopK`, `Aggregation`, `ScoreThreshold`, `
 
 ### `ComplexityChatRouteSelector.cs` (+ `ComplexityRouterOptions.cs`, `ChatComplexityTier.cs`)
 
-A **faithful port of LiteLLM's complexity router**. It scores each request with deterministic,
-sub-millisecond keyword/pattern rules, classifies it into a `ChatComplexityTier`, and routes to the
-model the caller explicitly mapped to that tier.
+Follows ClawRouter's rule-based complexity-scoring approach (which LiteLLM's complexity router is
+also based on). It scores each request with deterministic, sub-millisecond keyword/pattern rules,
+classifies it into a `ChatComplexityTier`, and routes to the model the caller explicitly mapped to
+that tier.
 
 **`ChatComplexityTier.cs`** is the four-value enum: `Simple`, `Medium`, `Complex`, `Reasoning`
-(mirroring LiteLLM's `SIMPLE`/`MEDIUM`/`COMPLEX`/`REASONING`).
+(matching the ClawRouter-style tiers that LiteLLM also uses).
 
 **`ComplexityRouterOptions.cs`** is the entire configurable surface — seven dimension weights, three
 tier boundaries, the short/long token thresholds, the reasoning-override count, and the keyword lists
-(code/reasoning/technical/simple) and multi-step **regexes**. Every default mirrors LiteLLM's
-`config.py`. Because the lists are just data, swapping `TechnicalTerms` for your own vocabulary turns
-this into a domain-aware router for free.
+(code/reasoning/technical/simple) and multi-step **regexes**. Defaults match LiteLLM's
+ClawRouter-based implementation (`config.py`). Because the lists are just data, swapping
+`TechnicalTerms` for your own vocabulary turns this into a domain-aware router for free.
 
 **`ComplexityChatRouteSelector.cs`** is the scorer. The constructor validates the tier map and
 precompiles the multi-step patterns into `Regex[]` (case-insensitive, culture-invariant, with a
 100 ms match timeout as a ReDoS guard). `SelectRouteAsync`:
 
 - Extracts the **last** user message and **last** system message (`ExtractUserAndSystem`).
-- With **no user message**, faithfully prefers the explicit `defaultModel`, else the `Medium`-tier
-  model (there's nothing to score).
+- With **no user message**, prefers the explicit `defaultModel`, else the `Medium`-tier model (there's
+  nothing to score).
 - Otherwise calls `Classify`, maps the tier to a model name (falling back to `defaultModel` for an
   unmapped tier, and to the first registered model when the mapped name is not registered), and
   returns a **single-model plan** for that model (`SelectTarget`). A tier classifier picks exactly one
   model and has no meaningful ranking of the others, so it leaves fallback to the router's
   `UseFallback` policy.
 
-`Classify` computes LiteLLM's exact weighted sum across the seven dimensions, applies the
+`Classify` computes the ClawRouter-style weighted sum across the seven dimensions, applies the
 "2+ distinct reasoning markers ⇒ `Reasoning`" override, then maps the score against the three
-boundaries. The matching helpers are faithful too: single-word keywords match on **word boundaries**
-(`ContainsWord`/`IsWordChar`, so `api` ≠ `capital`); multi-word phrases match as substrings; bucket
-scores are discrete, not linear; code/technical/simple read system+user text while reasoning markers,
-token count, and question count read the user message only. (The full scoring table, formula, and a
-worked example are in [`routing-chat-client.md`](./routing-chat-client.md#how-litellms-complexity-router-works-and-how-this-port-mirrors-it).)
+boundaries. The matching helpers keep the same semantics: single-word keywords match on **word
+boundaries** (`ContainsWord`/`IsWordChar`, so `api` ≠ `capital`); multi-word phrases match as
+substrings; bucket scores are discrete, not linear; code/technical/simple read system+user text while
+reasoning markers, token count, and question count read the user message only. (The full scoring
+table, formula, and a worked example are in
+[`routing-chat-client.md`](./routing-chat-client.md#how-the-complexity-router-works).)
 
 `ClassifyTier(messages)` is public so callers can get the tier without routing (no-user ⇒ `Medium`).
 
-### `ChatModelCatalog.cs` (+ `ChatModelCatalogOptions.cs`) — the catalog adapter
-
-A **policy-side helper** that maps external catalog documents into metadata-only `RoutingChatModel`
-entries. It is *not* part of the mechanism; it just produces advisory metadata a selector can consume.
-Two sources are supported via paired parse/load methods:
-
-- `ParseLiteLlm(json)` / `LoadLiteLlm(stream)` — LiteLLM's `model_prices_and_context_window.json`
-  (a name-keyed object); skips the `sample_spec` pseudo-entry and entries whose `mode != "chat"`.
-- `ParseGitHubModels(json)` / `LoadGitHubModels(stream)` — the GitHub Models catalog at
-  `https://models.github.ai/catalog/models` (a JSON array); skips embedding-only entries.
-
-Both produce models de-duplicated by name (case-insensitive, first wins). **Only objective fields are
-mapped.** Capability flags become `RoutingChatModelTraits` (LiteLLM `supports_*`; GitHub Models
-`capabilities` plus `supported_input_modalities` for `Vision`); `max_input_tokens` becomes
-`MaxInputTokens`. LiteLLM additionally carries per-token cost (converted to per-million) — the GitHub
-Models catalog has **no pricing**, which is exactly why the two are complementary: GitHub Models supplies
-capabilities and context limits, LiteLLM adds cost. Source-specific extras are carried under
-`AdditionalProperties` keyed with the `litellm.` or `github.` prefix. The GitHub Models parser resolves
-each entry's publisher-prefixed `id` (e.g. `openai/gpt-5-mini`) to a bare `Name` (`gpt-5-mini`, the merge
-key shared with LiteLLM) while keeping the full id as `ModelId` (what the inference endpoint expects).
-**Latency and quality are never inferred** — the catalogs carry no such data, so those stay the
-selector's responsibility.
-
-**`ChatModelCatalogOptions.cs`** controls both mappings: `ChatModelsOnly` (default `true`; LiteLLM keeps
-`mode == "chat"`, GitHub Models keeps entries whose output modalities include `"text"`), `UpdatedAt`
-(provenance stamp recorded on each model so a policy can reason about staleness), `SourceUri` (fallback
-source), and `IncludeModel` (a bare-name predicate to include/exclude entries). Produced models carry
-**no client** — bind one with `WithClient` or via a `RoutingChatModelCatalog`.
-
----
-
 ## The tests
 
-All three test files live under
+The relevant test files live under
 `test/Libraries/Microsoft.Extensions.AI.Tests/ChatRouting/` and run on `net10.0`.
 
 ### `RoutingChatClientTests.cs` — the mechanism (and selector integration)
@@ -383,28 +374,13 @@ each mechanism guarantee:
   global top-k, honors per-model thresholds, and falls back to the default model when nothing passes
   the threshold or the request has no user text.
 
-### `ComplexityChatRouteSelectorTests.cs` — the complexity port
+### `ComplexityChatRouteSelectorTests.cs` — the complexity selector
 
-Validates the faithful scoring and the routing wrapper: constructor rejects null/empty tier maps;
+Validates the ClawRouter-style scoring and the routing wrapper: constructor rejects null/empty tier maps;
 `ClassifyTier` classifies a greeting as `Simple`, forces `Reasoning` on two reasoning markers, and
 rates a code+technical prompt as `Complex`; `SelectRouteAsync` routes to the tier-mapped model, falls
 back to the default model for an unmapped tier, and falls back to the first registered model when the
 target model isn't present; and custom keyword lists change the classification (proving the options are honored).
-
-### `ChatModelCatalogTests.cs` — the catalog adapter
-
-Validates both mappings. For the LiteLLM parser: rejects null JSON; skips `sample_spec` and non-chat
-entries by default; maps the capability `supports_*` flags to traits; **never infers latency or
-quality**; converts per-token cost to per-million; carries the curated objective metadata under the
-`litellm.` prefix; leaves `MaxInputTokens` null when absent; includes embeddings when
-`ChatModelsOnly == false`; applies the `IncludeModel` filter and the `UpdatedAt` provenance;
-de-duplicates by name case-insensitively; `LoadLiteLlm(stream)` matches `ParseLiteLlm(string)`; and a
-parsed entry binds cleanly into a catalog and a client. For the GitHub Models parser: skips
-embedding-only entries by default; strips the publisher prefix for `Name` while keeping the full
-publisher-prefixed `ModelId`; maps `capabilities` and `supported_input_modalities` to traits; **never
-infers cost or latency**; carries `github.`-prefixed metadata; applies `ChatModelsOnly`, `IncludeModel`,
-and stream parity; and rejects a non-array root. A final cross-catalog test proves a shared model
-(`gpt-5-mini`) resolves to the same merge `Name` across both sources.
 
 ---
 

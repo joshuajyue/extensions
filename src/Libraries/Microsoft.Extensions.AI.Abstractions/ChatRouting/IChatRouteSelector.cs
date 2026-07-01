@@ -8,13 +8,13 @@ using Microsoft.Shared.DiagnosticIds;
 
 namespace Microsoft.Extensions.AI;
 
-/// <summary>Represents a swappable selection policy that decides how a <see cref="RoutingChatClient"/> routes a request.</summary>
+/// <summary>Represents a swappable selection policy that decides how a <c>RoutingChatClient</c> routes a request.</summary>
 /// <remarks>
-/// The routing mechanism (<see cref="RoutingChatClient"/>) is intentionally opinion-free; all
+/// The routing mechanism (<c>RoutingChatClient</c>) is intentionally opinion-free; all
 /// knowledge about which model is better, or what the user is asking for, lives in an
 /// implementation of this interface. Use <see cref="ChatRouteSelector.Create(System.Func{ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask{ChatRoutePlan}})"/>
-/// for inline delegates, or one of the built-in policies such as <see cref="ComplexityChatRouteSelector"/>
-/// or <see cref="SemanticChatRouteSelector"/>.
+/// for inline delegates, or one of the built-in policies such as <c>ComplexityChatRouteSelector</c>
+/// or <c>SemanticChatRouteSelector</c>.
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public interface IChatRouteSelector

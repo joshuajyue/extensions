@@ -19,7 +19,8 @@ namespace Microsoft.Extensions.AI;
 /// </summary>
 /// <remarks>
 /// <para>
-/// This mirrors the LiteLLM complexity router: it scores the request across several weighted
+/// This follows the rule-based approach of ClawRouter (which LiteLLM's complexity router is also based
+/// on): it scores the request across several weighted
 /// dimensions (prompt length, code keywords, reasoning markers, technical terms, simple indicators,
 /// multi-step patterns, and question complexity), maps the score to a tier, and resolves the tier to
 /// an explicitly configured model. Single-word keywords match on word boundaries; the system prompt
@@ -31,7 +32,7 @@ namespace Microsoft.Extensions.AI;
 /// <see cref="RoutingChatModel.Name"/>). When a tier has no mapping, the optional default model is
 /// used. A complexity classifier picks exactly one model, so the produced <see cref="ChatRoutePlan"/>
 /// contains just that model: it has no meaningful ranking of the other models to offer as fallbacks.
-/// Configure fallback on the router instead (see <see cref="RoutingChatClientBuilder.UseFallback()"/>),
+/// Configure fallback on the router instead (see <c>RoutingChatClientBuilder.UseFallback()</c>),
 /// which owns failure handling. Tune the scoring with <see cref="ComplexityRouterOptions"/>.
 /// </para>
 /// </remarks>

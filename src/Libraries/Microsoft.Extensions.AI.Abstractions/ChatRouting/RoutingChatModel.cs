@@ -8,7 +8,7 @@ using Microsoft.Shared.Diagnostics;
 
 namespace Microsoft.Extensions.AI;
 
-/// <summary>Describes a model that a <see cref="RoutingChatClient"/> can route to.</summary>
+/// <summary>Describes a model that a <c>RoutingChatClient</c> can route to.</summary>
 /// <remarks>
 /// A model carries optional metadata (provider, model id, traits, context window, cost, latency) and
 /// is bound to an <see cref="IChatClient"/> when used at runtime. Metadata-only instances (with no

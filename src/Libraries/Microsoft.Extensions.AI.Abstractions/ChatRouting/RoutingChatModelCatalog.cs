@@ -10,7 +10,7 @@ using Microsoft.Shared.Diagnostics;
 
 namespace Microsoft.Extensions.AI;
 
-/// <summary>Provides lookup for known chat model metadata used when configuring a <see cref="RoutingChatClient"/>.</summary>
+/// <summary>Provides lookup for known chat model metadata used when configuring a <c>RoutingChatClient</c>.</summary>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public class RoutingChatModelCatalog
 {

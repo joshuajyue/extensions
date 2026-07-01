@@ -2,6 +2,8 @@
 
 > `SemanticChatRouteSelector` is an experimental (`MEAI001`) selection policy for
 > [`RoutingChatClient`](routing-chat-client.md).
+> It ships in the experimental `Microsoft.Extensions.AI.Routing` package while staying in the
+> `Microsoft.Extensions.AI` namespace.
 
 ## Overview
 
@@ -12,12 +14,12 @@ the closest-matching model. It needs only an `IEmbeddingGenerator<string, Embedd
 LLM classification call.
 
 It is a drop-in policy: the routing **mechanism** (`RoutingChatClient`) is unchanged; only the
-selector differs. (The algorithm intentionally mirrors LiteLLM's "auto router"; this doc describes what
-the C# code does, not LiteLLM.)
+selector differs. It implements Aurelio Labs' `semantic-router` routing algorithm, the same library
+LiteLLM's "auto router" delegates to.
 
 ## How it works (a walk through the code)
 
-Everything happens in [`SemanticChatRouteSelector.cs`](../src/Libraries/Microsoft.Extensions.AI/ChatRouting/SemanticChatRouteSelector.cs).
+Everything happens in [`SemanticChatRouteSelector.cs`](../src/Libraries/Microsoft.Extensions.AI.Routing/SemanticChatRouteSelector.cs).
 The public entry point is `SelectRouteAsync(ChatRouteContext context, …)`, which runs these steps:
 
 ### 1. Build the constructor state
@@ -150,9 +152,9 @@ var selector = new SemanticChatRouteSelector(
     defaultModel: "openai:gpt-4o-mini",          // used when nothing passes the threshold
     options: new SemanticRouterOptions
     {
-        TopK = 5,                                 // global top-k utterance matches (LiteLLM default)
+        TopK = 5,                                 // global top-k utterance matches (LiteLLM integration default)
         Aggregation = SemanticRouteAggregation.Mean, // Mean (default), Sum, or Max
-        ScoreThreshold = 0.3f,                    // LiteLLM's default encoder threshold
+        ScoreThreshold = 0.3f,                    // matches the LiteLLM integration default
     });
 
 IChatClient router = new RoutingChatClientBuilder()
@@ -184,7 +186,7 @@ same generator, so the comparison is apples-to-apples.
   model should handle. A handful of focused phrases usually outperforms a single long one.
 - **`Aggregation`.** `Mean` (default) rewards a model that matches the query *consistently*; `Max`
   rewards a single strong match; `Sum` rewards matching in *many* ways (and favors models with more
-  utterances). These mirror LiteLLM's `sum`/`mean`/`max`.
+  utterances). These match the aggregation modes used by `semantic-router`/LiteLLM.
 - **`TopK`.** Only the globally highest `TopK` utterance matches (default `5`) feed aggregation, so a
   model must place an utterance in that global shortlist to be considered. Lower it to make routing
   more "winner-take-all"; raise it to average over more evidence.

@@ -1,0 +1,208 @@
+{
+  "Name": "Microsoft.Extensions.AI.Routing, Version=10.7.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35",
+  "Types": [
+    {
+      "Type": "enum Microsoft.Extensions.AI.ChatComplexityTier",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.ChatComplexityTier.ChatComplexityTier();",
+          "Stage": "Experimental"
+        }
+      ],
+      "Fields": [
+        {
+          "Member": "const Microsoft.Extensions.AI.ChatComplexityTier Microsoft.Extensions.AI.ChatComplexityTier.Complex",
+          "Stage": "Experimental",
+          "Value": "2"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.ChatComplexityTier Microsoft.Extensions.AI.ChatComplexityTier.Medium",
+          "Stage": "Experimental",
+          "Value": "1"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.ChatComplexityTier Microsoft.Extensions.AI.ChatComplexityTier.Reasoning",
+          "Stage": "Experimental",
+          "Value": "3"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.ChatComplexityTier Microsoft.Extensions.AI.ChatComplexityTier.Simple",
+          "Stage": "Experimental",
+          "Value": "0"
+        }
+      ]
+    },
+    {
+      "Type": "sealed class Microsoft.Extensions.AI.ComplexityChatRouteSelector : Microsoft.Extensions.AI.IChatRouteSelector",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.ComplexityChatRouteSelector.ComplexityChatRouteSelector(System.Collections.Generic.IReadOnlyDictionary<Microsoft.Extensions.AI.ChatComplexityTier, string> modelByTier, string? defaultModel = null, Microsoft.Extensions.AI.ComplexityRouterOptions? options = null);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ChatComplexityTier Microsoft.Extensions.AI.ComplexityChatRouteSelector.ClassifyTier(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan> Microsoft.Extensions.AI.ComplexityChatRouteSelector.SelectRouteAsync(Microsoft.Extensions.AI.ChatRouteContext context, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "sealed class Microsoft.Extensions.AI.ComplexityRouterOptions",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.ComplexityRouterOptions.ComplexityRouterOptions();",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<string> Microsoft.Extensions.AI.ComplexityRouterOptions.CodeKeywords { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.CodePresenceWeight { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.ComplexToReasoningThreshold { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "int Microsoft.Extensions.AI.ComplexityRouterOptions.LongPromptTokens { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.MediumToComplexThreshold { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<string> Microsoft.Extensions.AI.ComplexityRouterOptions.MultiStepPatterns { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.MultiStepPatternsWeight { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.QuestionComplexityWeight { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "int Microsoft.Extensions.AI.ComplexityRouterOptions.ReasoningMarkerOverrideCount { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<string> Microsoft.Extensions.AI.ComplexityRouterOptions.ReasoningMarkers { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.ReasoningMarkersWeight { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "int Microsoft.Extensions.AI.ComplexityRouterOptions.ShortPromptTokens { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<string> Microsoft.Extensions.AI.ComplexityRouterOptions.SimpleIndicators { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.SimpleIndicatorsWeight { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.SimpleToMediumThreshold { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<string> Microsoft.Extensions.AI.ComplexityRouterOptions.TechnicalTerms { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.TechnicalTermsWeight { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "double Microsoft.Extensions.AI.ComplexityRouterOptions.TokenCountWeight { get; set; }",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "sealed class Microsoft.Extensions.AI.SemanticChatRouteSelector : Microsoft.Extensions.AI.IChatRouteSelector",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.SemanticChatRouteSelector.SemanticChatRouteSelector(Microsoft.Extensions.AI.IEmbeddingGenerator<string, Microsoft.Extensions.AI.Embedding<float>> embeddingGenerator, System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<string>> modelProfiles, string? defaultModel = null, Microsoft.Extensions.AI.SemanticRouterOptions? options = null);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan> Microsoft.Extensions.AI.SemanticChatRouteSelector.SelectRouteAsync(Microsoft.Extensions.AI.ChatRouteContext context, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "enum Microsoft.Extensions.AI.SemanticRouteAggregation",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.SemanticRouteAggregation.SemanticRouteAggregation();",
+          "Stage": "Experimental"
+        }
+      ],
+      "Fields": [
+        {
+          "Member": "const Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouteAggregation.Max",
+          "Stage": "Experimental",
+          "Value": "2"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouteAggregation.Mean",
+          "Stage": "Experimental",
+          "Value": "1"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouteAggregation.Sum",
+          "Stage": "Experimental",
+          "Value": "0"
+        }
+      ]
+    },
+    {
+      "Type": "sealed class Microsoft.Extensions.AI.SemanticRouterOptions",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.SemanticRouterOptions.SemanticRouterOptions();",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "Microsoft.Extensions.AI.SemanticRouteAggregation Microsoft.Extensions.AI.SemanticRouterOptions.Aggregation { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "float Microsoft.Extensions.AI.SemanticRouterOptions.ScoreThreshold { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyDictionary<string, float>? Microsoft.Extensions.AI.SemanticRouterOptions.ScoreThresholdByModel { get; set; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "int Microsoft.Extensions.AI.SemanticRouterOptions.TopK { get; set; }",
+          "Stage": "Experimental"
+        }
+      ]
+    }
+  ]
+}

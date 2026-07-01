@@ -1420,6 +1420,68 @@
       ]
     },
     {
+      "Type": "sealed class Microsoft.Extensions.AI.ChatRouteContext",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.ChatRouteContext.ChatRouteContext(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models);",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> Microsoft.Extensions.AI.ChatRouteContext.Messages { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.ChatRouteContext.Models { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ChatOptions? Microsoft.Extensions.AI.ChatRouteContext.Options { get; }",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "sealed class Microsoft.Extensions.AI.ChatRoutePlan",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(Microsoft.Extensions.AI.RoutingChatModel model, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> orderedModels, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "System.Collections.Generic.IReadOnlyDictionary<string, object>? Microsoft.Extensions.AI.ChatRoutePlan.DecisionMetadata { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.ChatRoutePlan.OrderedModels { get; }",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "static class Microsoft.Extensions.AI.ChatRouteSelector",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "static Microsoft.Extensions.AI.IChatRouteSelector Microsoft.Extensions.AI.ChatRouteSelector.Create(System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan>> selector);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "static Microsoft.Extensions.AI.IChatRouteSelector Microsoft.Extensions.AI.ChatRouteSelector.Create(System.Func<Microsoft.Extensions.AI.ChatRouteContext, Microsoft.Extensions.AI.ChatRoutePlan> selector);",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
       "Type": "class Microsoft.Extensions.AI.ChatToolMode",
       "Stage": "Stable",
       "Methods": [
@@ -2792,6 +2854,16 @@
       ]
     },
     {
+      "Type": "interface Microsoft.Extensions.AI.IChatRouteSelector",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan> Microsoft.Extensions.AI.IChatRouteSelector.SelectRouteAsync(Microsoft.Extensions.AI.ChatRouteContext context, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
       "Type": "interface Microsoft.Extensions.AI.IEmbeddingGenerator : System.IDisposable",
       "Stage": "Stable",
       "Methods": [
@@ -3931,6 +4003,130 @@
         {
           "Member": "string? Microsoft.Extensions.AI.ResponseOutputItemRealtimeServerMessage.ResponseId { get; set; }",
           "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "class Microsoft.Extensions.AI.RoutingChatModel",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatModel.RoutingChatModel(string name, string? providerName = null, string? modelId = null, Microsoft.Extensions.AI.RoutingChatModelTraits traits = Microsoft.Extensions.AI.RoutingChatModelTraits.None, int? maxInputTokens = null, decimal? inputTokenCostPerMillion = null, decimal? outputTokenCostPerMillion = null, System.TimeSpan? typicalLatency = null, System.Uri? sourceUri = null, System.DateTimeOffset? updatedAt = null, Microsoft.Extensions.AI.AdditionalPropertiesDictionary? additionalProperties = null, Microsoft.Extensions.AI.IChatClient? client = null);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatModel Microsoft.Extensions.AI.RoutingChatModel.WithClient(Microsoft.Extensions.AI.IChatClient client);",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "Microsoft.Extensions.AI.AdditionalPropertiesDictionary? Microsoft.Extensions.AI.RoutingChatModel.AdditionalProperties { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.IChatClient? Microsoft.Extensions.AI.RoutingChatModel.Client { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "decimal? Microsoft.Extensions.AI.RoutingChatModel.InputTokenCostPerMillion { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "int? Microsoft.Extensions.AI.RoutingChatModel.MaxInputTokens { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "string? Microsoft.Extensions.AI.RoutingChatModel.ModelId { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "string Microsoft.Extensions.AI.RoutingChatModel.Name { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "decimal? Microsoft.Extensions.AI.RoutingChatModel.OutputTokenCostPerMillion { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "string? Microsoft.Extensions.AI.RoutingChatModel.ProviderName { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Uri? Microsoft.Extensions.AI.RoutingChatModel.SourceUri { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatModelTraits Microsoft.Extensions.AI.RoutingChatModel.Traits { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.TimeSpan? Microsoft.Extensions.AI.RoutingChatModel.TypicalLatency { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.DateTimeOffset? Microsoft.Extensions.AI.RoutingChatModel.UpdatedAt { get; }",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "class Microsoft.Extensions.AI.RoutingChatModelCatalog",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatModelCatalog.RoutingChatModelCatalog(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.RoutingChatModel> entries);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatModel Microsoft.Extensions.AI.RoutingChatModelCatalog.CreateModel(string name, Microsoft.Extensions.AI.IChatClient client);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatModel Microsoft.Extensions.AI.RoutingChatModelCatalog.Get(string name);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "bool Microsoft.Extensions.AI.RoutingChatModelCatalog.TryGet(string name, out Microsoft.Extensions.AI.RoutingChatModel? entry);",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> Microsoft.Extensions.AI.RoutingChatModelCatalog.Entries { get; }",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
+      "Type": "enum Microsoft.Extensions.AI.RoutingChatModelTraits",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.RoutingChatModelTraits.RoutingChatModelTraits();",
+          "Stage": "Experimental"
+        }
+      ],
+      "Fields": [
+        {
+          "Member": "const Microsoft.Extensions.AI.RoutingChatModelTraits Microsoft.Extensions.AI.RoutingChatModelTraits.None",
+          "Stage": "Experimental",
+          "Value": "0"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.RoutingChatModelTraits Microsoft.Extensions.AI.RoutingChatModelTraits.Reasoning",
+          "Stage": "Experimental",
+          "Value": "4"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.RoutingChatModelTraits Microsoft.Extensions.AI.RoutingChatModelTraits.ToolCalling",
+          "Stage": "Experimental",
+          "Value": "1"
+        },
+        {
+          "Member": "const Microsoft.Extensions.AI.RoutingChatModelTraits Microsoft.Extensions.AI.RoutingChatModelTraits.Vision",
+          "Stage": "Experimental",
+          "Value": "2"
         }
       ]
     },

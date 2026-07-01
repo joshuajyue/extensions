@@ -14,7 +14,7 @@ namespace Microsoft.Extensions.AI;
 /// A plan is the ordered list of models the selector prefers: the first is the primary, and any remaining
 /// models are fallbacks the router tries in order if an attempt fails. A selector that naturally picks a
 /// single model may return a one-model plan and leave fallback to the router (see
-/// <see cref="RoutingChatClientBuilder.UseFallback()"/>).
+/// <c>RoutingChatClientBuilder.UseFallback()</c>).
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public sealed class ChatRoutePlan
@@ -59,7 +59,7 @@ public sealed class ChatRoutePlan
     /// <remarks>
     /// A selector may annotate its decision with signals such as a complexity tier or a semantic similarity
     /// score. The router surfaces each entry as a tag on its <c>routing.decision</c>
-    /// <see cref="System.Diagnostics.ActivityEvent"/> (see <see cref="RoutingChatClient.DecisionEventName"/>),
+    /// activity event (named by <c>RoutingChatClient.DecisionEventName</c>),
     /// so it is observable through any OpenTelemetry trace exporter without affecting routing behavior.
     /// </remarks>
     public IReadOnlyDictionary<string, object>? DecisionMetadata { get; }
