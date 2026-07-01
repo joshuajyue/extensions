@@ -33,6 +33,11 @@ public enum RoutingChatModelTraits
     /// <summary>The model supports vision inputs (LiteLLM <c>supports_vision</c>/<c>supports_image_input</c>).</summary>
     Vision = 1 << 1,
 
-    /// <summary>The model supports reasoning (LiteLLM <c>supports_reasoning</c>).</summary>
+    /// <summary>
+    /// The model supports reasoning (LiteLLM <c>supports_reasoning</c>). Advisory and selector-only: unlike
+    /// <see cref="ToolCalling"/> and <see cref="Vision"/>, the router's capability gate never filters on this
+    /// trait (a request carries no objective "requires reasoning" signal the way it carries tools or image
+    /// content), so it matters only if a selection policy chooses to read it.
+    /// </summary>
     Reasoning = 1 << 2,
 }

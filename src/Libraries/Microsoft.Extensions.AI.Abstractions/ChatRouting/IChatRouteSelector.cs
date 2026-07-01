@@ -23,5 +23,11 @@ public interface IChatRouteSelector
     /// <param name="context">The inputs available for the decision.</param>
     /// <param name="cancellationToken">A token used to cancel the operation.</param>
     /// <returns>A plan whose first model is the primary route and whose remaining models are fallbacks.</returns>
+    /// <remarks>
+    /// Every model in the returned plan must be one of the exact <see cref="ChatRouteContext.Models"/>
+    /// instances passed to this call: the router matches routes by reference identity, not by value, so
+    /// returning a reconstructed or otherwise unknown <c>RoutingChatModel</c> (even one with identical
+    /// metadata) causes the router to throw when it attempts that route.
+    /// </remarks>
     ValueTask<ChatRoutePlan> SelectRouteAsync(ChatRouteContext context, CancellationToken cancellationToken = default);
 }

@@ -39,6 +39,13 @@ namespace Microsoft.Extensions.AI;
 /// produced plan ranks all models (primary first, the rest by descending score), so lower-scoring
 /// models act as fallbacks.
 /// </para>
+/// <para>
+/// Profile keys are matched to registered models by <see cref="RoutingChatModel.Name"/>
+/// (case-insensitive). A profile whose key does not correspond to any model in the request's
+/// <c>ChatRouteContext.Models</c> is silently ignored — its utterances can never win — and there is no
+/// diagnostic for such an unmatched key, so keep the profile keys in sync with the models you register.
+/// A registered model with no profile is only reachable as the default route or a plan fallback.
+/// </para>
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public sealed class SemanticChatRouteSelector : IChatRouteSelector
@@ -347,9 +354,15 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
             }
         }
 
-        // A faulted or canceled embedding is not cached: EnsureProfilesAsync re-initiates it on the next call.
+        // The profile index is process-lifetime and shared across every request, so it is embedded with
+        // CancellationToken.None rather than the caller's token: a single request cancelling must not fault the
+        // one cached index that concurrent requests are awaiting. (The per-request query embedding in
+        // ScoreModelsAsync still honors the caller's token.) A faulted embedding is not cached: EnsureProfilesAsync
+        // re-initiates it on the next call. The parameter is retained for a symmetric signature but deliberately
+        // not forwarded to the embedding call.
+        _ = cancellationToken;
         GeneratedEmbeddings<Embedding<float>> embeddings =
-            await _embeddingGenerator.GenerateAsync(utterances, cancellationToken: cancellationToken);
+            await _embeddingGenerator.GenerateAsync(utterances, cancellationToken: CancellationToken.None);
 
         var vectors = new float[utterances.Count][];
         for (int i = 0; i < utterances.Count; i++)

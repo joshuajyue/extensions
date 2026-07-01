@@ -1544,6 +1544,11 @@
       ],
       "Fields": [
         {
+          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.ActivitySourceName",
+          "Stage": "Experimental",
+          "Value": "Microsoft.Extensions.AI.Routing"
+        },
+        {
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.AttemptEventName",
           "Stage": "Experimental",
           "Value": "routing.attempt"
@@ -1562,6 +1567,11 @@
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedModelNameKey",
           "Stage": "Experimental",
           "Value": "routing.selected_model"
+        },
+        {
+          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedPathKey",
+          "Stage": "Experimental",
+          "Value": "routing.selected_path"
         },
         {
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedProviderNameKey",

@@ -14,7 +14,10 @@ namespace Microsoft.Extensions.AI;
 /// is bound to an <see cref="IChatClient"/> when used at runtime. Metadata-only instances (with no
 /// <see cref="Client"/>) can be stored in a <see cref="RoutingChatModelCatalog"/> and bound to a
 /// concrete client later. The metadata is advisory: the routing mechanism never interprets it, and
-/// only a selection policy (an <see cref="IChatRouteSelector"/>) decides how to use it.
+/// only a selection policy (an <see cref="IChatRouteSelector"/>) decides how to use it. In particular,
+/// no built-in selector reads the cost, context-window, or latency hints — cost- or context-aware
+/// routing is bring-your-own-selector: supply an <see cref="IChatRouteSelector"/> that reads these
+/// properties (and any <see cref="AdditionalProperties"/>).
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public class RoutingChatModel

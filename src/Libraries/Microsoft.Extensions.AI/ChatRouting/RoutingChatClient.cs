@@ -65,6 +65,15 @@ public class RoutingChatClient : IChatClient
     public const string SelectedProviderNameKey = "routing.selected_provider";
 
     /// <summary>
+    /// The key under which the full winning route path is stamped onto a response, outermost first and the
+    /// concrete leaf model last (for example <c>"Complexity/gpt-4o-mini"</c>). Where <see cref="SelectedModelNameKey"/>
+    /// answers <em>who</em> produced the response (always the leaf), this answers <em>how it got there</em>. When
+    /// routers nest, each router prepends the model it selected as the response unwinds, so the path grows one
+    /// segment per level to any depth. For a single (non-nested) router the path equals the selected model name.
+    /// </summary>
+    public const string SelectedPathKey = "routing.selected_path";
+
+    /// <summary>
     /// The name of the <see cref="ActivityEvent"/> the router adds to <see cref="Activity.Current"/> for each
     /// model it attempts. Read these events with an <see cref="ActivityListener"/> (or any OpenTelemetry trace
     /// exporter) to observe the full per-request attempt timeline — the order models were tried, which failed
@@ -80,6 +89,20 @@ public class RoutingChatClient : IChatClient
     /// </summary>
     public const string DecisionEventName = "routing.decision";
 
+    /// <summary>
+    /// The name of the <see cref="System.Diagnostics.ActivitySource"/> under which the router opens one span per
+    /// routed request. Subscribe an <see cref="ActivityListener"/> (or any OpenTelemetry trace exporter) to this
+    /// source to observe routing as a span tree: each <see cref="RoutingChatClient"/> — including one nested inside
+    /// another as a candidate model — gets its own span, so its <see cref="DecisionEventName"/>/<see cref="AttemptEventName"/>
+    /// events and per-attempt ordinals are scoped to that span and never collide with an enclosing router's.
+    /// Sampling is decided here, per source and process-wide, so a whole tree of nested routers samples uniformly —
+    /// there is no per-instance tracing switch. When nothing subscribes, no span is created and the events fall back
+    /// to the ambient <see cref="Activity.Current"/> (the flat-router behavior), so identity and path stamped onto
+    /// the response — <see cref="SelectedModelNameKey"/> and <see cref="SelectedPathKey"/> — remain available without
+    /// any tracing configured.
+    /// </summary>
+    public const string ActivitySourceName = "Microsoft.Extensions.AI.Routing";
+
     // Tag keys carried by each routing.attempt event. Kept private: the event/tag schema is a telemetry detail
     // observed through ActivityListener, not a programmatic API surface.
     private const string AttemptOrdinalKey = "routing.attempt.ordinal";
@@ -94,6 +117,24 @@ public class RoutingChatClient : IChatClient
     private const string AttemptOutcomeSuccess = "success";   // this model produced a response (or first token)
     private const string AttemptOutcomeFallback = "fallback"; // this model failed; the router fell back to the next
     private const string AttemptOutcomeError = "error";       // this model failed and no fallback remained (propagates)
+
+    // The name of the span a router opens per request. See ActivitySourceName for how nesting composes.
+    private const string RouteActivityName = "routing.route";
+
+    // One ActivitySource shared by every RoutingChatClient instance (whether a span is created is decided by
+    // process-wide listeners keyed on ActivitySourceName, not by any per-instance flag). Opening a child span per
+    // router is what lets nested routers form a span tree instead of clobbering one another's events on a single
+    // shared activity; when unsubscribed, StartActivity returns null at effectively zero cost and the events fall
+    // back to the ambient activity, preserving the original flat-router behavior.
+    private static readonly ActivitySource _activitySource = new(ActivitySourceName);
+
+    // The metadata surfaced via GetService<ChatClientMetadata>(). The provider is the fixed synthetic
+    // "routing" rather than any inner model's provider: the router fans out to N providers (and may even
+    // cross providers within a single request via fallback), so there is no single honest provider name to
+    // report at this layer. The real per-request provider/model is reported by the selected branch's own
+    // pipeline; DefaultModelId is null because the model is chosen per request. Without this, wrapping the
+    // router directly in UseOpenTelemetry() would leave its span with no provider attribution.
+    private static readonly ChatClientMetadata _metadata = new(providerName: "routing");
 
     private readonly RoutingChatModel[] _models;
     private readonly ReadOnlyCollection<RoutingChatModel> _modelList;
@@ -136,6 +177,10 @@ public class RoutingChatClient : IChatClient
         CancellationToken cancellationToken = default)
     {
         _ = Throw.IfNull(messages);
+
+        // Open this router's own span (child of any enclosing router's span). Null when unsubscribed, in which
+        // case the decision/attempt events below fall back to the ambient Activity.Current.
+        using Activity? routeActivity = _activitySource.StartActivity(RouteActivityName);
 
         IEnumerable<ChatMessage> normalizedMessages = NormalizeMessages(messages);
         IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
@@ -182,6 +227,10 @@ public class RoutingChatClient : IChatClient
     {
         _ = Throw.IfNull(messages);
 
+        // Open this router's own span (child of any enclosing router's span). Null when unsubscribed, in which
+        // case the decision/attempt events below fall back to the ambient Activity.Current.
+        using Activity? routeActivity = _activitySource.StartActivity(RouteActivityName);
+
         IEnumerable<ChatMessage> normalizedMessages = NormalizeMessages(messages);
         IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
         var context = new ChatRouteContext(normalizedMessages, options, candidates);
@@ -189,6 +238,15 @@ public class RoutingChatClient : IChatClient
         RecordDecisionEvent(plan);
 
         RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
+
+        // Mirror the non-streaming path's invariant: a plan always carries at least one model, so an empty
+        // attempt order is unreachable today. Guard it anyway so both paths fail identically rather than the
+        // stream silently completing empty if a future selector/gate change ever yields zero attempts.
+        if (ordered.Length == 0)
+        {
+            throw new InvalidOperationException("Routing produced no model to invoke.");
+        }
+
         for (int i = 0; i < ordered.Length; i++)
         {
             RoutingChatModel model = ValidateRoutedModel(ordered[i]);
@@ -235,6 +293,15 @@ public class RoutingChatClient : IChatClient
                     }
 
                     yield return update;
+                    if (routeActivity is not null)
+                    {
+                        // Restore this router's span as current after the yield: the async-iterator state machine
+                        // can otherwise drop it (https://github.com/dotnet/runtime/issues/47802), which would
+                        // misparent a nested router's span on the next MoveNextAsync. Guarded so an unsubscribed
+                        // (null) source never clobbers the caller's ambient activity.
+                        Activity.Current = routeActivity;
+                    }
+
                     hasFirst = await enumerator.MoveNextAsync();
                 }
             }
@@ -252,12 +319,22 @@ public class RoutingChatClient : IChatClient
     {
         _ = Throw.IfNull(serviceType);
 
-        if (serviceKey is null && serviceType.IsInstanceOfType(this))
+        if (serviceKey is not null)
+        {
+            return null;
+        }
+
+        if (serviceType == typeof(ChatClientMetadata))
+        {
+            return _metadata;
+        }
+
+        if (serviceType.IsInstanceOfType(this))
         {
             return this;
         }
 
-        return serviceKey is null && _selector is not null && serviceType.IsInstanceOfType(_selector) ? _selector : null;
+        return _selector is not null && serviceType.IsInstanceOfType(_selector) ? _selector : null;
     }
 
     /// <summary>Disposes the current instance and all model chat clients, ensuring that each client is disposed only once.</summary>
@@ -452,20 +529,37 @@ public class RoutingChatClient : IChatClient
             return;
         }
 
-        AdditionalPropertiesDictionary props = response.AdditionalProperties ??= [];
-        props[SelectedModelNameKey] = model.Name;
-        props[SelectedModelIdKey] = model.ModelId;
-        props[SelectedProviderNameKey] = model.ProviderName;
-
+        StampIdentity(response.AdditionalProperties ??= [], model);
         StampActivity(model);
     }
 
-    private static void StampUpdate(ChatResponseUpdate update, RoutingChatModel model)
+    private static void StampUpdate(ChatResponseUpdate update, RoutingChatModel model) =>
+        StampIdentity(update.AdditionalProperties ??= [], model);
+
+    // Records "who answered" (identity) and "how it got there" (path) onto a response/update's properties.
+    //
+    // Identity (SelectedModelNameKey/IdKey/ProviderNameKey) is written first-writer-wins. When routers nest, the
+    // innermost router stamps first — with the concrete leaf model that actually produced the tokens — and any
+    // outer router's later stamp over the same object is skipped. This keeps identity leaf-truthful (correct for
+    // billing, the "routed to" badge, and model-pinning) rather than being overwritten by an intermediate router
+    // whose own ModelId/ProviderName are null. The three keys move together so identity is never half-written.
+    //
+    // Path (SelectedPathKey) is complementary and accumulates: each router prepends the name of the model it
+    // selected as the response unwinds, yielding the full winning route to any depth (for example
+    // "Complexity/gpt-4o-mini"). Identity answers "who"; path answers "how it got there" — two concerns kept in
+    // two keys rather than overloaded onto one scalar, which is what previously corrupted identity under nesting.
+    private static void StampIdentity(AdditionalPropertiesDictionary props, RoutingChatModel model)
     {
-        AdditionalPropertiesDictionary props = update.AdditionalProperties ??= [];
-        props[SelectedModelNameKey] = model.Name;
-        props[SelectedModelIdKey] = model.ModelId;
-        props[SelectedProviderNameKey] = model.ProviderName;
+        if (!props.ContainsKey(SelectedModelNameKey))
+        {
+            props[SelectedModelNameKey] = model.Name;
+            props[SelectedModelIdKey] = model.ModelId;
+            props[SelectedProviderNameKey] = model.ProviderName;
+        }
+
+        props[SelectedPathKey] = props.TryGetValue(SelectedPathKey, out string? prior) && prior is not null
+            ? $"{model.Name}/{prior}"
+            : model.Name;
     }
 
     private static void StampActivity(RoutingChatModel model)

@@ -26,6 +26,22 @@ public class RoutingChatClientTests
     }
 
     [Fact]
+    public void GetService_ReturnsRoutingChatClientMetadata()
+    {
+        using var inner = new TestChatClient();
+        using var client = new RoutingChatClient([new RoutingChatModel("m1", client: inner)]);
+
+        // Exposing ChatClientMetadata is what lets UseOpenTelemetry() attribute the router's own span. The
+        // provider is the fixed synthetic "routing" (the router fans out to many providers, so no single one
+        // is honest here); the model is per-request, so DefaultModelId is null.
+        ChatClientMetadata? metadata = client.GetService<ChatClientMetadata>();
+
+        Assert.NotNull(metadata);
+        Assert.Equal("routing", metadata!.ProviderName);
+        Assert.Null(metadata.DefaultModelId);
+    }
+
+    [Fact]
     public async Task DefaultSelector_ForwardsModelId_StampsResponse_AndDoesNotLeakIntoRequest()
     {
         var expectedResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
@@ -570,6 +586,68 @@ public class RoutingChatClientTests
     }
 
     [Fact]
+    public async Task SemanticSelector_EmbedsProfilesWithNoneToken_ButQueryWithCallerToken()
+    {
+        var models = new[]
+        {
+            new RoutingChatModel("code"),
+            new RoutingChatModel("weather"),
+        };
+
+        var profiles = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["weather"] = ["what is the weather like"],
+            ["code"] = ["fix this bug in the code"],
+        };
+
+        var profileUtterances = new HashSet<string>(profiles.Values.SelectMany(v => v), StringComparer.Ordinal);
+        CancellationToken profileToken = new(canceled: true); // sentinel: fails the assertion if the profile embed never runs
+        CancellationToken? queryToken = null;
+
+        using var embedder = new TestEmbeddingGenerator
+        {
+            GenerateAsyncCallback = (values, _, ct) =>
+            {
+                var list = values.ToList();
+
+                // The one-shot profile embed passes every registered utterance; the per-request embed passes
+                // just the (unknown) query string.
+                if (list.Count > 0 && list.All(profileUtterances.Contains))
+                {
+                    profileToken = ct;
+                }
+                else
+                {
+                    queryToken = ct;
+                }
+
+                var result = new GeneratedEmbeddings<Embedding<float>>();
+                foreach (string value in list)
+                {
+                    result.Add(new Embedding<float>(KeywordVector(value)));
+                }
+
+                return Task.FromResult(result);
+            }
+        };
+
+        var selector = new SemanticChatRouteSelector(embedder, profiles);
+        using var requestCts = new CancellationTokenSource();
+        var context = new ChatRouteContext([new(ChatRole.User, "is it going to rain today")], options: null, models);
+
+        _ = await selector.SelectRouteAsync(context, requestCts.Token);
+
+        // Process-lifetime profiles are embedded with a non-cancelable token so one request cancelling cannot
+        // fault the single cached index that concurrent requests await.
+        Assert.False(profileToken.CanBeCanceled);
+        Assert.Equal(CancellationToken.None, profileToken);
+
+        // The per-request query embedding still honors the caller's token.
+        Assert.True(queryToken.HasValue);
+        Assert.Equal(requestCts.Token, queryToken!.Value);
+    }
+
+    [Fact]
     public async Task SemanticSelector_FallsBackToFirstModelBelowMinimumSimilarity()
     {
         var models = new[]
@@ -802,6 +880,84 @@ public class RoutingChatClientTests
         Assert.Equal(1.0, Assert.IsType<double>(GetTag(decision, "routing.semantic.score")), 3);
     }
 
+    [Fact]
+    public async Task Nesting_LeafWinsIdentity_AndPathAccumulates()
+    {
+        // A router-of-routers: the outer router's single "model" is itself an inner RoutingChatClient whose leaf
+        // is the concrete provider model. The response must identify the LEAF that produced the tokens — not the
+        // outer "Complexity" wrapper, whose ModelId/ProviderName are null — while the path records the full route.
+        var leafResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var leafClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(leafResponse) };
+
+        using var inner = new RoutingChatClient(
+            [new RoutingChatModel("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
+        using var outer = new RoutingChatClient(
+            [new RoutingChatModel("Complexity", client: inner)],
+            capabilityGate: false);
+
+        ChatResponse response = await outer.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Same(leafResponse, response);
+        AdditionalPropertiesDictionary props = response.AdditionalProperties!;
+        Assert.Equal("gpt-4o-mini", props[RoutingChatClient.SelectedModelNameKey]);
+        Assert.Equal("openai/gpt-4o-mini", props[RoutingChatClient.SelectedModelIdKey]);
+        Assert.Equal("openai", props[RoutingChatClient.SelectedProviderNameKey]);
+        Assert.Equal("Complexity/gpt-4o-mini", props[RoutingChatClient.SelectedPathKey]);
+    }
+
+    [Fact]
+    public async Task Nesting_Streaming_LeafWinsIdentity_AndPathAccumulates()
+    {
+        // Same composition, streaming: both routers stamp the same first update object as it flows up. The inner
+        // (leaf) stamp must win for identity, and the outer must prepend its segment to the path.
+        using var leafClient = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("ok") };
+        using var inner = new RoutingChatClient(
+            [new RoutingChatModel("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
+        using var outer = new RoutingChatClient(
+            [new RoutingChatModel("Complexity", client: inner)],
+            capabilityGate: false);
+
+        ChatResponseUpdate? first = null;
+        await foreach (ChatResponseUpdate update in outer.GetStreamingResponseAsync([new(ChatRole.User, "hi")]))
+        {
+            first ??= update;
+        }
+
+        Assert.NotNull(first);
+        AdditionalPropertiesDictionary props = first!.AdditionalProperties!;
+        Assert.Equal("gpt-4o-mini", props[RoutingChatClient.SelectedModelNameKey]);
+        Assert.Equal("openai/gpt-4o-mini", props[RoutingChatClient.SelectedModelIdKey]);
+        Assert.Equal("Complexity/gpt-4o-mini", props[RoutingChatClient.SelectedPathKey]);
+    }
+
+    [Fact]
+    public async Task Nesting_WhenRoutingSourceSubscribed_ProducesSpanTreeWithPerRouterEvents()
+    {
+        // When a listener subscribes to the routing ActivitySource, each router opens its OWN span, so nested
+        // routers form a tree and each router's decision/attempt events are scoped to its span. This is the fix
+        // for events colliding on a single shared activity: both attempts legitimately carry ordinal 1 because
+        // they live on different spans.
+        var leafResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var leafClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(leafResponse) };
+        using var inner = new RoutingChatClient(
+            [new RoutingChatModel("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
+        using var outer = new RoutingChatClient(
+            [new RoutingChatModel("Complexity", client: inner)],
+            capabilityGate: false);
+
+        using var capture = new RoutingSpanCapture();
+        _ = await outer.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Equal(2, capture.Spans.Count);
+
+        Activity innerSpan = Assert.Single(capture.Spans, s => SpanSelectedModel(s) == "gpt-4o-mini");
+        Activity outerSpan = Assert.Single(capture.Spans, s => SpanSelectedModel(s) == "Complexity");
+
+        Assert.Equal(outerSpan.SpanId, innerSpan.ParentSpanId);
+        Assert.Equal(1, SpanAttemptOrdinal(innerSpan));
+        Assert.Equal(1, SpanAttemptOrdinal(outerSpan));
+    }
+
     private static TestEmbeddingGenerator KeywordEmbeddingGenerator() => new()
     {
         GenerateAsyncCallback = (values, _, _) =>
@@ -920,6 +1076,35 @@ public class RoutingChatClientTests
             _source.Dispose();
         }
     }
+
+    // Subscribes to the routing ActivitySource so every RoutingChatClient opens its own span, and collects those
+    // spans when they stop (their events are final at that point). Lets a test observe routing as a span tree and
+    // assert each router's events are scoped to its own span rather than sharing one ambient activity.
+    private sealed class RoutingSpanCapture : IDisposable
+    {
+        private readonly ActivityListener _listener;
+
+        public RoutingSpanCapture()
+        {
+            _listener = new ActivityListener
+            {
+                ShouldListenTo = s => s.Name == RoutingChatClient.ActivitySourceName,
+                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+                ActivityStopped = Spans.Add,
+            };
+            ActivitySource.AddActivityListener(_listener);
+        }
+
+        public List<Activity> Spans { get; } = [];
+
+        public void Dispose() => _listener.Dispose();
+    }
+
+    private static string? SpanSelectedModel(Activity span) =>
+        (string?)GetTag(Assert.Single(span.Events, e => e.Name == RoutingChatClient.DecisionEventName), "routing.selected_model");
+
+    private static int SpanAttemptOrdinal(Activity span) =>
+        (int)GetTag(Assert.Single(span.Events, e => e.Name == RoutingChatClient.AttemptEventName), "routing.attempt.ordinal")!;
 
     private sealed class CountingDisposeClient : IChatClient
     {
