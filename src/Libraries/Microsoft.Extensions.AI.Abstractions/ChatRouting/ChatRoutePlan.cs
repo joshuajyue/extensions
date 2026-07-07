@@ -11,49 +11,49 @@ namespace Microsoft.Extensions.AI;
 
 /// <summary>Represents the decision produced by an <see cref="IChatRouteSelector"/>.</summary>
 /// <remarks>
-/// A plan is the ordered list of models the selector prefers: the first is the primary, and any remaining
-/// models are fallbacks the router tries in order if an attempt fails. A selector that naturally picks a
-/// single model may return a one-model plan and leave fallback to the router (see the router's
-/// <c>fallback</c> policy).
+/// A plan is the ordered list of routes the selector prefers: the first is the primary, and any remaining
+/// routes are fallbacks the router tries in order if an attempt fails. A selector that naturally picks a
+/// single route may return a one-route plan and leave fallback to the router (see the router's
+/// <c>onFailure</c> delegate).
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public sealed class ChatRoutePlan
 {
-    /// <summary>Initializes a new instance of the <see cref="ChatRoutePlan"/> class with a single model.</summary>
-    /// <param name="model">The model to route to.</param>
+    /// <summary>Initializes a new instance of the <see cref="ChatRoutePlan"/> class with a single route.</summary>
+    /// <param name="route">The route to dispatch to.</param>
     /// <param name="decisionMetadata">Optional decision-rationale metadata the router surfaces in telemetry.</param>
     public ChatRoutePlan(
-        RoutingChatModel model,
+        ChatRoute route,
         IReadOnlyDictionary<string, object>? decisionMetadata = null)
-        : this([Throw.IfNull(model)], decisionMetadata)
+        : this([Throw.IfNull(route)], decisionMetadata)
     {
     }
 
-    /// <summary>Initializes a new instance of the <see cref="ChatRoutePlan"/> class with an ordered list of models.</summary>
-    /// <param name="orderedModels">The models to route to, primary first followed by fallbacks.</param>
+    /// <summary>Initializes a new instance of the <see cref="ChatRoutePlan"/> class with an ordered list of routes.</summary>
+    /// <param name="orderedRoutes">The routes to dispatch to, primary first followed by fallbacks.</param>
     /// <param name="decisionMetadata">Optional decision-rationale metadata the router surfaces in telemetry.</param>
     public ChatRoutePlan(
-        IReadOnlyList<RoutingChatModel> orderedModels,
+        IReadOnlyList<ChatRoute> orderedRoutes,
         IReadOnlyDictionary<string, object>? decisionMetadata = null)
     {
-        _ = Throw.IfNull(orderedModels);
-        if (orderedModels.Count == 0)
+        _ = Throw.IfNull(orderedRoutes);
+        if (orderedRoutes.Count == 0)
         {
-            Throw.ArgumentException(nameof(orderedModels), "A route plan must contain at least one model.");
+            Throw.ArgumentException(nameof(orderedRoutes), "A route plan must contain at least one route.");
         }
 
-        var copy = new RoutingChatModel[orderedModels.Count];
-        for (int i = 0; i < orderedModels.Count; i++)
+        var copy = new ChatRoute[orderedRoutes.Count];
+        for (int i = 0; i < orderedRoutes.Count; i++)
         {
-            copy[i] = Throw.IfNull(orderedModels[i]);
+            copy[i] = Throw.IfNull(orderedRoutes[i]);
         }
 
-        OrderedModels = new ReadOnlyCollection<RoutingChatModel>(copy);
+        OrderedRoutes = new ReadOnlyCollection<ChatRoute>(copy);
         DecisionMetadata = decisionMetadata;
     }
 
-    /// <summary>Gets the models to route to, primary first followed by fallbacks tried in order on failure.</summary>
-    public IReadOnlyList<RoutingChatModel> OrderedModels { get; }
+    /// <summary>Gets the routes to dispatch to, primary first followed by fallbacks tried in order on failure.</summary>
+    public IReadOnlyList<ChatRoute> OrderedRoutes { get; }
 
     /// <summary>Gets optional decision-rationale metadata describing why the selector chose this plan.</summary>
     /// <remarks>

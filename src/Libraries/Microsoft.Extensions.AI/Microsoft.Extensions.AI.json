@@ -1514,11 +1514,47 @@
       ]
     },
     {
+      "Type": "sealed class Microsoft.Extensions.AI.RouteFailureContext",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.RouteFailureContext.RouteFailureContext(Microsoft.Extensions.AI.ChatRoute route, System.Exception exception, int attemptNumber, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> remaining, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages);",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "int Microsoft.Extensions.AI.RouteFailureContext.AttemptNumber { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Exception Microsoft.Extensions.AI.RouteFailureContext.Exception { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> Microsoft.Extensions.AI.RouteFailureContext.Messages { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ChatOptions? Microsoft.Extensions.AI.RouteFailureContext.Options { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> Microsoft.Extensions.AI.RouteFailureContext.Remaining { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.RouteFailureContext.Route { get; }",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
       "Type": "class Microsoft.Extensions.AI.RoutingChatClient : Microsoft.Extensions.AI.IChatClient, System.IDisposable",
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel> models, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.RoutingChatModel>>? fallback = null, bool capabilityGate = true);",
+          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, System.Collections.Generic.IReadOnlyCollection<string>>? capabilityDetector = null);",
           "Stage": "Experimental"
         },
         {
@@ -1564,11 +1600,6 @@
           "Value": "routing.selected_model_id"
         },
         {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedModelNameKey",
-          "Stage": "Experimental",
-          "Value": "routing.selected_model"
-        },
-        {
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedPathKey",
           "Stage": "Experimental",
           "Value": "routing.selected_path"
@@ -1577,6 +1608,11 @@
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedProviderNameKey",
           "Stage": "Experimental",
           "Value": "routing.selected_provider"
+        },
+        {
+          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedRouteNameKey",
+          "Stage": "Experimental",
+          "Value": "routing.selected_route"
         }
       ]
     },

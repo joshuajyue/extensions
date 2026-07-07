@@ -16,8 +16,8 @@ namespace Microsoft.Extensions.AI;
 /// <summary>
 /// An embedding-based selection policy implementing the routing approach of Aurelio Labs' semantic-router
 /// (the same algorithm LiteLLM's "auto router" delegates to):
-/// each model is described by a small set of representative "utterances", and a request is routed to
-/// the model whose utterances are most semantically similar to the last user message.
+/// each route is described by a small set of representative "utterances", and a request is routed to
+/// the route whose utterances are most semantically similar to the last user message.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -25,87 +25,87 @@ namespace Microsoft.Extensions.AI;
 /// "auto router" delegates to), using any <see cref="IEmbeddingGenerator{TInput, TEmbedding}"/> as
 /// the embedding backend. For each request it: embeds the last user message; computes cosine similarity
 /// against every profile utterance; keeps the globally highest <see cref="SemanticRouterOptions.TopK"/>
-/// matches; groups those matches by model; combines each model's matched scores with
+/// matches; groups those matches by route; combines each route's matched scores with
 /// <see cref="SemanticRouterOptions.Aggregation"/> (mean by default); then, in descending aggregated
-/// score order, routes to the first model whose score meets its threshold
-/// (<see cref="SemanticRouterOptions.ScoreThreshold"/>, or a per-model override). When no model meets
-/// the threshold — or the request carries no user text — the optional <c>defaultModel</c> (else the
-/// first registered model) becomes the primary route.
+/// score order, routes to the first route whose score meets its threshold
+/// (<see cref="SemanticRouterOptions.ScoreThreshold"/>, or a per-route override). When no route meets
+/// the threshold — or the request carries no user text — the optional <c>defaultRoute</c> (else the
+/// first registered route) becomes the primary route.
 /// </para>
 /// <para>
 /// Profiles are embedded once on first use and cached; wrap the injected generator with caching to also
 /// amortize the per-request query embedding. Similarity is computed with
 /// <see cref="TensorPrimitives.CosineSimilarity(ReadOnlySpan{float}, ReadOnlySpan{float})"/>. The
-/// produced plan ranks all models (primary first, the rest by descending score), so lower-scoring
-/// models act as fallbacks.
+/// produced plan ranks all routes (primary first, the rest by descending score), so lower-scoring
+/// routes act as fallbacks.
 /// </para>
 /// <para>
-/// Profile keys are matched to registered models by <see cref="RoutingChatModel.Name"/>
-/// (case-insensitive). A profile whose key does not correspond to any model in the request's
-/// <c>ChatRouteContext.Models</c> is silently ignored — its utterances can never win — and there is no
-/// diagnostic for such an unmatched key, so keep the profile keys in sync with the models you register.
-/// A registered model with no profile is only reachable as the default route or a plan fallback.
+/// Profile keys are matched to registered routes by <see cref="ChatRoute.Name"/>
+/// (case-insensitive). A profile whose key does not correspond to any route in the request's
+/// <c>ChatRouteContext.Routes</c> is silently ignored — its utterances can never win — and there is no
+/// diagnostic for such an unmatched key, so keep the profile keys in sync with the routes you register.
+/// A registered route with no profile is only reachable as the default route or a plan fallback.
 /// </para>
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public sealed class SemanticChatRouteSelector : IChatRouteSelector
 {
-    // Decision-rationale key surfaced as a routing.decision tag (the pinned model's aggregated cosine
+    // Decision-rationale key surfaced as a routing.decision tag (the pinned route's aggregated cosine
     // similarity). Kept private: the tag schema is a telemetry detail observed through ActivityListener.
     private const string SemanticScoreMetadataKey = "routing.semantic.score";
 
     private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
-    private readonly Dictionary<string, string[]> _modelProfiles;
-    private readonly string? _defaultModel;
+    private readonly Dictionary<string, string[]> _routeProfiles;
+    private readonly string? _defaultRoute;
     private readonly int _topK;
     private readonly SemanticRouteAggregation _aggregation;
     private readonly float _scoreThreshold;
-    private readonly Dictionary<string, float>? _scoreThresholdByModel;
+    private readonly Dictionary<string, float>? _scoreThresholdByRoute;
     private readonly object _gate = new();
 
     private Task<ProfileIndex>? _profilesTask;
 
     /// <summary>Initializes a new instance of the <see cref="SemanticChatRouteSelector"/> class.</summary>
     /// <param name="embeddingGenerator">The embedding generator used to embed profiles and queries.</param>
-    /// <param name="modelProfiles">A map from model name to representative utterances describing that model.</param>
-    /// <param name="defaultModel">
-    /// The optional model name to route to when no model's aggregated score meets its threshold, or the
-    /// request has no user text. When omitted, the first registered model is used.
+    /// <param name="routeProfiles">A map from route name to representative utterances describing that route.</param>
+    /// <param name="defaultRoute">
+    /// The optional route name to route to when no route's aggregated score meets its threshold, or the
+    /// request has no user text. When omitted, the first registered route is used.
     /// </param>
     /// <param name="options">The optional routing configuration. Defaults mirror the LiteLLM semantic router.</param>
     public SemanticChatRouteSelector(
         IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
-        IReadOnlyDictionary<string, IReadOnlyList<string>> modelProfiles,
-        string? defaultModel = null,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> routeProfiles,
+        string? defaultRoute = null,
         SemanticRouterOptions? options = null)
     {
         _embeddingGenerator = Throw.IfNull(embeddingGenerator);
-        _ = Throw.IfNull(modelProfiles);
+        _ = Throw.IfNull(routeProfiles);
 
-        _modelProfiles = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, IReadOnlyList<string>> profile in modelProfiles)
+        _routeProfiles = new(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, IReadOnlyList<string>> profile in routeProfiles)
         {
             _ = Throw.IfNullOrWhitespace(profile.Key);
             if (profile.Value is null || profile.Value.Count == 0)
             {
-                Throw.ArgumentException(nameof(modelProfiles), $"The profile for '{profile.Key}' must contain at least one utterance.");
+                Throw.ArgumentException(nameof(routeProfiles), $"The profile for '{profile.Key}' must contain at least one utterance.");
             }
 
             var utterances = new string[profile.Value.Count];
             for (int i = 0; i < profile.Value.Count; i++)
             {
-                utterances[i] = Throw.IfNullOrWhitespace(profile.Value[i], $"{nameof(modelProfiles)} utterance");
+                utterances[i] = Throw.IfNullOrWhitespace(profile.Value[i], $"{nameof(routeProfiles)} utterance");
             }
 
-            _modelProfiles[profile.Key] = utterances;
+            _routeProfiles[profile.Key] = utterances;
         }
 
-        if (_modelProfiles.Count == 0)
+        if (_routeProfiles.Count == 0)
         {
-            Throw.ArgumentException(nameof(modelProfiles), "At least one model profile must be provided.");
+            Throw.ArgumentException(nameof(routeProfiles), "At least one route profile must be provided.");
         }
 
-        _defaultModel = defaultModel;
+        _defaultRoute = defaultRoute;
 
         options ??= new SemanticRouterOptions();
         if (options.TopK < 1)
@@ -116,9 +116,9 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         _topK = options.TopK;
         _aggregation = options.Aggregation;
         _scoreThreshold = options.ScoreThreshold;
-        if (options.ScoreThresholdByModel is { Count: > 0 })
+        if (options.ScoreThresholdByRoute is { Count: > 0 })
         {
-            _scoreThresholdByModel = options.ScoreThresholdByModel.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+            _scoreThresholdByRoute = options.ScoreThresholdByRoute.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         }
     }
 
@@ -131,13 +131,13 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         if (string.IsNullOrWhiteSpace(query))
         {
             // Faithful to LiteLLM: with no user message there is nothing to route on, so fall back.
-            return new ChatRoutePlan(OrderPlan(ctx.Models, PrimaryFallback(ctx.Models), scores: null));
+            return new ChatRoutePlan(OrderPlan(ctx.Routes, PrimaryFallback(ctx.Routes), scores: null));
         }
 
-        Dictionary<string, double> aggregated = await ScoreModelsAsync(query!, ctx.Models, cancellationToken);
+        Dictionary<string, double> aggregated = await ScoreRoutesAsync(query!, ctx.Routes, cancellationToken);
 
-        string? winner = SelectWinner(aggregated, ctx.Models);
-        string primary = winner ?? PrimaryFallback(ctx.Models);
+        string? winner = SelectWinner(aggregated, ctx.Routes);
+        string primary = winner ?? PrimaryFallback(ctx.Routes);
 
         Dictionary<string, object>? metadata = null;
         if (aggregated.TryGetValue(primary, out double primaryScore))
@@ -145,23 +145,23 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
             metadata = new Dictionary<string, object>(StringComparer.Ordinal) { [SemanticScoreMetadataKey] = primaryScore };
         }
 
-        return new ChatRoutePlan(OrderPlan(ctx.Models, primary, aggregated), metadata);
+        return new ChatRoutePlan(OrderPlan(ctx.Routes, primary, aggregated), metadata);
     }
 
-    // Orders the plan: the primary model first, then the remaining models by descending aggregated
-    // score (unscored models keep registration order).
-    private static RoutingChatModel[] OrderPlan(IReadOnlyList<RoutingChatModel> models, string primary, Dictionary<string, double>? scores)
+    // Orders the plan: the primary route first, then the remaining routes by descending aggregated
+    // score (unscored routes keep registration order).
+    private static ChatRoute[] OrderPlan(IReadOnlyList<ChatRoute> routes, string primary, Dictionary<string, double>? scores)
     {
-        return models
-            .Select((model, index) => (
-                Model: model,
+        return routes
+            .Select((route, index) => (
+                Route: route,
                 Index: index,
-                IsPrimary: string.Equals(model.Name, primary, StringComparison.OrdinalIgnoreCase),
-                Score: scores is not null && scores.TryGetValue(model.Name, out double score) ? score : double.NegativeInfinity))
+                IsPrimary: string.Equals(route.Name, primary, StringComparison.OrdinalIgnoreCase),
+                Score: scores is not null && scores.TryGetValue(route.Name, out double score) ? score : double.NegativeInfinity))
             .OrderByDescending(entry => entry.IsPrimary)
             .ThenByDescending(entry => entry.Score)
             .ThenBy(entry => entry.Index)
-            .Select(entry => entry.Model)
+            .Select(entry => entry.Route)
             .ToArray();
     }
 
@@ -181,9 +181,9 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         return lastUser;
     }
 
-    // Embeds the query, scores every registered model's utterances by cosine similarity, keeps the globally
-    // highest TopK matches, and reduces each model's matched scores with the configured aggregation.
-    private async ValueTask<Dictionary<string, double>> ScoreModelsAsync(string query, IReadOnlyList<RoutingChatModel> models, CancellationToken cancellationToken)
+    // Embeds the query, scores every registered route's utterances by cosine similarity, keeps the globally
+    // highest TopK matches, and reduces each route's matched scores with the configured aggregation.
+    private async ValueTask<Dictionary<string, double>> ScoreRoutesAsync(string query, IReadOnlyList<ChatRoute> routes, CancellationToken cancellationToken)
     {
         ProfileIndex index = await EnsureProfilesAsync(cancellationToken);
 
@@ -191,12 +191,12 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
             await _embeddingGenerator.GenerateAsync([query], cancellationToken: cancellationToken);
         ReadOnlyMemory<float> queryVector = queryEmbedding[0].Vector;
 
-        // Only utterances belonging to a currently-registered model can win, mirroring how the router
+        // Only utterances belonging to a currently-registered route can win, mirroring how the router
         // can only route to a known deployment.
         var registered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (RoutingChatModel model in models)
+        foreach (ChatRoute route in routes)
         {
-            _ = registered.Add(model.Name);
+            _ = registered.Add(route.Name);
         }
 
         // Score every profile utterance with cosine similarity against the query.
@@ -222,24 +222,24 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         });
 
         int take = Math.Min(_topK, matches.Count);
-        return AggregateTopMatches(matches, take, models);
+        return AggregateTopMatches(matches, take, routes);
     }
 
-    // Resolves the threshold a model must meet to be selected: its per-model override if present, else the
+    // Resolves the threshold a route must meet to be selected: its per-route override if present, else the
     // global threshold.
-    private float ThresholdFor(string modelName)
+    private float ThresholdFor(string routeName)
     {
-        if (_scoreThresholdByModel is not null && _scoreThresholdByModel.TryGetValue(modelName, out float perModel))
+        if (_scoreThresholdByRoute is not null && _scoreThresholdByRoute.TryGetValue(routeName, out float perRoute))
         {
-            return perModel;
+            return perRoute;
         }
 
         return _scoreThreshold;
     }
 
-    // Groups the top `take` matches by model and reduces each model's scores with the configured
+    // Groups the top `take` matches by route and reduces each route's scores with the configured
     // aggregation. Only the matches that survive the global top-k contribute, faithful to LiteLLM.
-    private Dictionary<string, double> AggregateTopMatches(List<Match> matches, int take, IReadOnlyList<RoutingChatModel> models)
+    private Dictionary<string, double> AggregateTopMatches(List<Match> matches, int take, IReadOnlyList<ChatRoute> routes)
     {
         var grouped = new Dictionary<string, (double Sum, double Max, int Count)>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < take; i++)
@@ -255,13 +255,13 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
             }
         }
 
-        // Key the result by the registered model's exact name so downstream ordering matches by identity.
+        // Key the result by the registered route's exact name so downstream ordering matches by identity.
         var result = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-        foreach (RoutingChatModel model in models)
+        foreach (ChatRoute route in routes)
         {
-            if (grouped.TryGetValue(model.Name, out (double Sum, double Max, int Count) stats))
+            if (grouped.TryGetValue(route.Name, out (double Sum, double Max, int Count) stats))
             {
-                result[model.Name] = _aggregation switch
+                result[route.Name] = _aggregation switch
                 {
                     SemanticRouteAggregation.Sum => stats.Sum,
                     SemanticRouteAggregation.Max => stats.Max,
@@ -273,17 +273,17 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         return result;
     }
 
-    // Iterates models in descending aggregated score (ties by registration order) and returns the first
-    // whose score meets its threshold (a per-model override, else the global threshold). Faithful to
+    // Iterates routes in descending aggregated score (ties by registration order) and returns the first
+    // whose score meets its threshold (a per-route override, else the global threshold). Faithful to
     // semantic-router's _pass_routes, which sorts by score then returns the first route past threshold.
-    private string? SelectWinner(Dictionary<string, double> aggregated, IReadOnlyList<RoutingChatModel> models)
+    private string? SelectWinner(Dictionary<string, double> aggregated, IReadOnlyList<ChatRoute> routes)
     {
         var ordered = new List<(string Name, double Score, int Order)>(aggregated.Count);
-        for (int order = 0; order < models.Count; order++)
+        for (int order = 0; order < routes.Count; order++)
         {
-            if (aggregated.TryGetValue(models[order].Name, out double score))
+            if (aggregated.TryGetValue(routes[order].Name, out double score))
             {
-                ordered.Add((models[order].Name, score, order));
+                ordered.Add((routes[order].Name, score, order));
             }
         }
 
@@ -304,22 +304,22 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         return null;
     }
 
-    // The primary route used when no model passes its threshold: the configured default model if it is
-    // registered, otherwise the first registered model.
-    private string PrimaryFallback(IReadOnlyList<RoutingChatModel> models)
+    // The primary route used when no route passes its threshold: the configured default route if it is
+    // registered, otherwise the first registered route.
+    private string PrimaryFallback(IReadOnlyList<ChatRoute> routes)
     {
-        if (_defaultModel is not null)
+        if (_defaultRoute is not null)
         {
-            foreach (RoutingChatModel model in models)
+            foreach (ChatRoute route in routes)
             {
-                if (string.Equals(model.Name, _defaultModel, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(route.Name, _defaultRoute, StringComparison.OrdinalIgnoreCase))
                 {
-                    return model.Name;
+                    return route.Name;
                 }
             }
         }
 
-        return models[0].Name;
+        return routes[0].Name;
     }
 
     private Task<ProfileIndex> EnsureProfilesAsync(CancellationToken cancellationToken)
@@ -345,7 +345,7 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
     {
         var names = new List<string>();
         var utterances = new List<string>();
-        foreach (KeyValuePair<string, string[]> profile in _modelProfiles)
+        foreach (KeyValuePair<string, string[]> profile in _routeProfiles)
         {
             foreach (string utterance in profile.Value)
             {
@@ -357,7 +357,7 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         // The profile index is process-lifetime and shared across every request, so it is embedded with
         // CancellationToken.None rather than the caller's token: a single request cancelling must not fault the
         // one cached index that concurrent requests are awaiting. (The per-request query embedding in
-        // ScoreModelsAsync still honors the caller's token.) A faulted embedding is not cached: EnsureProfilesAsync
+        // ScoreRoutesAsync still honors the caller's token.) A faulted embedding is not cached: EnsureProfilesAsync
         // re-initiates it on the next call. The parameter is retained for a symmetric signature but deliberately
         // not forwarded to the embedding call.
         _ = cancellationToken;
@@ -373,7 +373,7 @@ public sealed class SemanticChatRouteSelector : IChatRouteSelector
         return new ProfileIndex(names.ToArray(), vectors);
     }
 
-    // A flattened index of every profile utterance: RouteNames[i] is the model that owns Vectors[i].
+    // A flattened index of every profile utterance: RouteNames[i] is the route that owns Vectors[i].
     private sealed class ProfileIndex
     {
         public ProfileIndex(string[] routeNames, float[][] vectors)

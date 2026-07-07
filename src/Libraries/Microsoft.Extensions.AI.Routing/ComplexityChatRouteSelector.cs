@@ -15,7 +15,7 @@ namespace Microsoft.Extensions.AI;
 
 /// <summary>
 /// A deterministic selection policy that classifies each request into a <see cref="ChatComplexityTier"/>
-/// using rule-based keyword and pattern scoring, then routes to the model the caller mapped to that tier.
+/// using rule-based keyword and pattern scoring, then routes to the route the caller mapped to that tier.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -23,17 +23,17 @@ namespace Microsoft.Extensions.AI;
 /// on): it scores the request across several weighted
 /// dimensions (prompt length, code keywords, reasoning markers, technical terms, simple indicators,
 /// multi-step patterns, and question complexity), maps the score to a tier, and resolves the tier to
-/// an explicitly configured model. Single-word keywords match on word boundaries; the system prompt
+/// an explicitly configured route. Single-word keywords match on word boundaries; the system prompt
 /// contributes to the code, technical, and simple signals while reasoning markers consider only the
 /// user message. Scoring requires no external calls and is sub-millisecond.
 /// </para>
 /// <para>
-/// The tier-to-model mapping is supplied explicitly at construction (keyed by the model's
-/// <see cref="RoutingChatModel.Name"/>). When a tier has no mapping, the optional default model is
-/// used. A complexity classifier picks exactly one model, so the produced <see cref="ChatRoutePlan"/>
-/// contains just that model: it has no meaningful ranking of the other models to offer as fallbacks.
-/// Configure fallback on the router instead (see the router's <c>fallback</c> policy),
-/// which owns failure handling. Tune the scoring with <see cref="ComplexityRouterOptions"/>.
+/// The tier-to-route mapping is supplied explicitly at construction (keyed by the route's
+/// <see cref="ChatRoute.Name"/>). When a tier has no mapping, the optional default route is
+/// used. A complexity classifier picks exactly one route, so the produced <see cref="ChatRoutePlan"/>
+/// contains just that route: it has no meaningful ranking of the other routes to offer as fallbacks.
+/// Configure failure handling on the router instead (see the router's <c>onFailure</c> delegate),
+/// which owns fallback ordering. Tune the scoring with <see cref="ComplexityRouterOptions"/>.
 /// </para>
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
@@ -72,32 +72,32 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
     // tag schema is a telemetry detail observed through ActivityListener, not a programmatic API surface.
     private const string ComplexityTierMetadataKey = "routing.complexity.tier";
 
-    private readonly Dictionary<ChatComplexityTier, string> _modelByTier;
-    private readonly string? _defaultModel;
+    private readonly Dictionary<ChatComplexityTier, string> _routeByTier;
+    private readonly string? _defaultRoute;
     private readonly ComplexityRouterOptions _options;
     private readonly Regex[] _multiStepPatterns;
 
     /// <summary>Initializes a new instance of the <see cref="ComplexityChatRouteSelector"/> class.</summary>
-    /// <param name="modelByTier">
-    /// The explicit mapping from a complexity tier to the <see cref="RoutingChatModel.Name"/> to route to.
+    /// <param name="routeByTier">
+    /// The explicit mapping from a complexity tier to the <see cref="ChatRoute.Name"/> to route to.
     /// </param>
-    /// <param name="defaultModel">
-    /// The optional model name to use when the computed tier has no entry in <paramref name="modelByTier"/>.
+    /// <param name="defaultRoute">
+    /// The optional route name to use when the computed tier has no entry in <paramref name="routeByTier"/>.
     /// </param>
     /// <param name="options">The optional scoring configuration. Defaults mirror the LiteLLM complexity router.</param>
     public ComplexityChatRouteSelector(
-        IReadOnlyDictionary<ChatComplexityTier, string> modelByTier,
-        string? defaultModel = null,
+        IReadOnlyDictionary<ChatComplexityTier, string> routeByTier,
+        string? defaultRoute = null,
         ComplexityRouterOptions? options = null)
     {
-        _ = Throw.IfNull(modelByTier);
-        if (modelByTier.Count == 0)
+        _ = Throw.IfNull(routeByTier);
+        if (routeByTier.Count == 0)
         {
-            Throw.ArgumentException(nameof(modelByTier), "At least one tier-to-model mapping must be provided.");
+            Throw.ArgumentException(nameof(routeByTier), "At least one tier-to-route mapping must be provided.");
         }
 
-        _modelByTier = modelByTier.ToDictionary(static pair => pair.Key, static pair => pair.Value);
-        _defaultModel = defaultModel;
+        _routeByTier = routeByTier.ToDictionary(static pair => pair.Key, static pair => pair.Value);
+        _defaultRoute = defaultRoute;
         _options = options ?? new ComplexityRouterOptions();
 
         var multiStep = new List<Regex>(_options.MultiStepPatterns.Count);
@@ -121,17 +121,17 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
         if (userText is null)
         {
             // Faithful to LiteLLM: with no user message there is nothing to score, so this classifies as
-            // Medium and prefers the explicit default model, falling back to whatever is mapped to Medium.
+            // Medium and prefers the explicit default route, falling back to whatever is mapped to Medium.
             tier = ChatComplexityTier.Medium;
-            targetName = _defaultModel ?? (_modelByTier.TryGetValue(ChatComplexityTier.Medium, out string? medium) ? medium : null);
+            targetName = _defaultRoute ?? (_routeByTier.TryGetValue(ChatComplexityTier.Medium, out string? medium) ? medium : null);
         }
         else
         {
             tier = Classify(userText, systemText, _options, _multiStepPatterns);
-            targetName = _modelByTier.TryGetValue(tier, out string? mapped) ? mapped : _defaultModel;
+            targetName = _routeByTier.TryGetValue(tier, out string? mapped) ? mapped : _defaultRoute;
         }
 
-        RoutingChatModel target = SelectTarget(ctx.Models, targetName);
+        ChatRoute target = SelectTarget(ctx.Routes, targetName);
 
         var metadata = new Dictionary<string, object>(StringComparer.Ordinal)
         {
@@ -323,23 +323,23 @@ public sealed class ComplexityChatRouteSelector : IChatRouteSelector
         return (userText, systemText);
     }
 
-    // Complexity classifies a request into exactly one tier, so the plan is a single model: the one mapped
-    // to that tier. When the mapping is absent or names a model that is not registered, the first registered
-    // model is used as a deterministic, opinion-free default. The router owns any fallback (see UseFallback),
-    // because a tier classifier has no meaningful ranking of the other models to offer.
-    private static RoutingChatModel SelectTarget(IReadOnlyList<RoutingChatModel> models, string? targetName)
+    // Complexity classifies a request into exactly one tier, so the plan is a single route: the one mapped
+    // to that tier. When the mapping is absent or names a route that is not registered, the first registered
+    // route is used as a deterministic, opinion-free default. The router owns any fallback (see its onFailure
+    // delegate), because a tier classifier has no meaningful ranking of the other routes to offer.
+    private static ChatRoute SelectTarget(IReadOnlyList<ChatRoute> routes, string? targetName)
     {
         if (targetName is not null)
         {
-            foreach (RoutingChatModel model in models)
+            foreach (ChatRoute route in routes)
             {
-                if (string.Equals(model.Name, targetName, StringComparison.Ordinal))
+                if (string.Equals(route.Name, targetName, StringComparison.OrdinalIgnoreCase))
                 {
-                    return model;
+                    return route;
                 }
             }
         }
 
-        return models[0];
+        return routes[0];
     }
 }

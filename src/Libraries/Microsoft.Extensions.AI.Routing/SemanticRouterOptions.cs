@@ -12,7 +12,7 @@ namespace Microsoft.Extensions.AI;
 /// All defaults mirror the LiteLLM semantic router (its underlying <c>semantic-router</c> library):
 /// the globally highest <see cref="TopK"/> utterance matches are kept, grouped by model, and combined
 /// with <see cref="Aggregation"/>; a model is then chosen only when its aggregated score meets
-/// <see cref="ScoreThreshold"/> (or its per-model override in <see cref="ScoreThresholdByModel"/>).
+/// <see cref="ScoreThreshold"/> (or its per-model override in <see cref="ScoreThresholdByRoute"/>).
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public sealed class SemanticRouterOptions
@@ -45,10 +45,10 @@ public sealed class SemanticRouterOptions
     public float ScoreThreshold { get; set; } = 0.3f;
 
     /// <summary>
-    /// Gets or sets optional per-model score thresholds keyed by the model's
-    /// <see cref="RoutingChatModel.Name"/>. A model present here uses its own threshold instead of
+    /// Gets or sets optional per-route score thresholds keyed by the route's
+    /// <see cref="ChatRoute.Name"/>. A route present here uses its own threshold instead of
     /// <see cref="ScoreThreshold"/>, matching the per-route <c>score_threshold</c> of the LiteLLM
-    /// semantic router. The default is <see langword="null"/> (every model uses <see cref="ScoreThreshold"/>).
+    /// semantic router. The default is <see langword="null"/> (every route uses <see cref="ScoreThreshold"/>).
     /// </summary>
-    public IReadOnlyDictionary<string, float>? ScoreThresholdByModel { get; set; }
+    public IReadOnlyDictionary<string, float>? ScoreThresholdByRoute { get; set; }
 }

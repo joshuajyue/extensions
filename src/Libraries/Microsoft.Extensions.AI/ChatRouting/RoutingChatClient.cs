@@ -32,20 +32,30 @@ namespace Microsoft.Extensions.AI;
 /// </para>
 /// <para>
 /// Before a selector runs, the router applies a soft <em>capability gate</em>: it narrows the candidate
-/// models to those that can satisfy capabilities the request provably needs (image content requires
-/// <see cref="RoutingChatModelTraits.Vision"/>; supplied <see cref="ChatOptions.Tools"/> require
-/// <see cref="RoutingChatModelTraits.ToolCalling"/>). This is a correctness filter shared by every selector
-/// and the fallback chain — not a quality signal. It is soft: when no registered model declares a required
-/// capability, the gate falls through to the full set rather than stranding the request, and it can be
-/// bypassed entirely via the <c>capabilityGate</c> constructor parameter.
+/// routes to those that can satisfy capabilities the request provably needs. The required capabilities are
+/// produced by an injectable <em>capability detector</em>; the default detector requires
+/// <see cref="ChatModelCapabilities.Vision"/> when a message carries image content and
+/// <see cref="ChatModelCapabilities.FunctionCalling"/> when <see cref="ChatOptions.Tools"/> include an
+/// <see cref="AIFunctionDeclaration"/>. A route declares the tokens it supports under
+/// <see cref="ChatModelCapabilities.PropertyKey"/> in its <see cref="ChatRoute.AdditionalProperties"/>, and the
+/// router keeps only routes whose declared set is a superset of the required set. This is a correctness filter
+/// shared by every selector and the fallback chain — not a quality signal. It is soft: when no registered route
+/// declares a required capability, the gate falls through to the full set rather than stranding the request, and
+/// it can be disabled by supplying a <c>capabilityDetector</c> that always returns no tokens.
 /// </para>
 /// <para>
 /// A selector returns a <see cref="ChatRoutePlan"/> of the models it prefers, primary first. The router
-/// attempts those in order; if every model in the plan fails, an optional <em>fallback policy</em> (the
-/// <c>fallback</c> constructor parameter) decides
-/// the order in which any remaining candidate models are tried. This lets a selector that naturally picks
-/// a single model (for example a complexity classifier) stay out of the fallback business: it returns just
-/// its primary, and the router owns failure handling.
+/// attempts those in order. When a route's dispatch fails before any output is committed, an optional
+/// <em>failure delegate</em> (the <c>onFailure</c> constructor parameter) is consulted with the failed route,
+/// the unclassified exception, and the untried candidates still available; it returns the routes to try next,
+/// in order — any subset of the survivors, optionally reintroducing a capable candidate the plan omitted — or
+/// an empty result to stop and rethrow. This single hook owns continue-versus-stop, fallback ordering, and
+/// blast-radius pruning (for example dropping every route that shares the failed route's provider on an
+/// authentication error), so a selector that naturally picks one model (for example a complexity classifier)
+/// can stay out of the failure business entirely and let the router own it. When <c>onFailure</c> is
+/// <see langword="null"/>, the router walks the plan's routes in order and rethrows once they are exhausted.
+/// Because returned routes are de-duplicated against those already attempted, routing always terminates. The
+/// router holds no error taxonomy of its own: the delegate owns any interpretation of the exception.
 /// </para>
 /// <para>
 /// Because each candidate is itself an <see cref="IChatClient"/>, a routing pipeline forms a tree:
@@ -55,10 +65,20 @@ namespace Microsoft.Extensions.AI;
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public class RoutingChatClient : IChatClient
 {
-    /// <summary>The key under which the selected model's name is stamped onto a response.</summary>
-    public const string SelectedModelNameKey = "routing.selected_model";
+    /// <summary>
+    /// The key under which the selected route's name — its router-local alias, not necessarily a provider model
+    /// identifier — is stamped onto a response. Use it to see <em>which route</em> answered; for cost or usage
+    /// attribution use <see cref="SelectedModelIdKey"/> instead, since a route name can be an arbitrary alias,
+    /// can be reused across providers, and need not match any billable model.
+    /// </summary>
+    public const string SelectedRouteNameKey = "routing.selected_route";
 
-    /// <summary>The key under which the selected model's identifier is stamped onto a response.</summary>
+    /// <summary>
+    /// The key under which the selected route's underlying provider model identifier is stamped onto a response.
+    /// This is the concrete model the request was billed against, so it — not <see cref="SelectedRouteNameKey"/>,
+    /// which is a router-local alias — is the correct signal for cost and usage attribution. May be absent when
+    /// the chosen client does not expose a model identifier.
+    /// </summary>
     public const string SelectedModelIdKey = "routing.selected_model_id";
 
     /// <summary>The key under which the selected model's provider name is stamped onto a response.</summary>
@@ -66,10 +86,10 @@ public class RoutingChatClient : IChatClient
 
     /// <summary>
     /// The key under which the full winning route path is stamped onto a response, outermost first and the
-    /// concrete leaf model last (for example <c>"Complexity/gpt-4o-mini"</c>). Where <see cref="SelectedModelNameKey"/>
+    /// concrete leaf model last (for example <c>"Complexity/gpt-4o-mini"</c>). Where <see cref="SelectedRouteNameKey"/>
     /// answers <em>who</em> produced the response (always the leaf), this answers <em>how it got there</em>. When
     /// routers nest, each router prepends the model it selected as the response unwinds, so the path grows one
-    /// segment per level to any depth. For a single (non-nested) router the path equals the selected model name.
+    /// segment per level to any depth. For a single (non-nested) router the path equals the selected route name.
     /// </summary>
     public const string SelectedPathKey = "routing.selected_path";
 
@@ -98,7 +118,7 @@ public class RoutingChatClient : IChatClient
     /// Sampling is decided here, per source and process-wide, so a whole tree of nested routers samples uniformly —
     /// there is no per-instance tracing switch. When nothing subscribes, no span is created and the events fall back
     /// to the ambient <see cref="Activity.Current"/> (the flat-router behavior), so identity and path stamped onto
-    /// the response — <see cref="SelectedModelNameKey"/> and <see cref="SelectedPathKey"/> — remain available without
+    /// the response — <see cref="SelectedRouteNameKey"/> and <see cref="SelectedPathKey"/> — remain available without
     /// any tracing configured.
     /// </summary>
     public const string ActivitySourceName = "Microsoft.Extensions.AI.Routing";
@@ -106,7 +126,7 @@ public class RoutingChatClient : IChatClient
     // Tag keys carried by each routing.attempt event. Kept private: the event/tag schema is a telemetry detail
     // observed through ActivityListener, not a programmatic API surface.
     private const string AttemptOrdinalKey = "routing.attempt.ordinal";
-    private const string AttemptModelKey = "routing.attempt.model";
+    private const string AttemptRouteKey = "routing.attempt.route";
     private const string AttemptModelIdKey = "routing.attempt.model_id";
     private const string AttemptProviderKey = "routing.attempt.provider";
     private const string AttemptOutcomeKey = "routing.attempt.outcome";
@@ -136,38 +156,51 @@ public class RoutingChatClient : IChatClient
     // router directly in UseOpenTelemetry() would leave its span with no provider attribution.
     private static readonly ChatClientMetadata _metadata = new(providerName: "routing");
 
-    private readonly RoutingChatModel[] _models;
-    private readonly ReadOnlyCollection<RoutingChatModel> _modelList;
+    private readonly ChatRoute[] _routes;
+    private readonly ReadOnlyCollection<ChatRoute> _routeList;
     private readonly IChatRouteSelector? _selector;
-    private readonly Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? _fallback;
-    private readonly bool _capabilityGate;
+    private readonly Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>? _onFailure;
+    private readonly Func<IEnumerable<ChatMessage>, ChatOptions?, IReadOnlyCollection<string>> _capabilityDetector;
 
     /// <summary>Initializes a new instance of the <see cref="RoutingChatClient"/> class.</summary>
-    /// <param name="models">The models to route between. At least one is required, each bound to an <see cref="IChatClient"/>.</param>
+    /// <param name="routes">The routes to dispatch between. At least one is required, each bound to an <see cref="IChatClient"/>.</param>
     /// <param name="selector">The selection policy, or <see langword="null"/> for the opinion-free default.</param>
-    /// <param name="fallback">
-    /// An optional fallback policy. After every model in the selected <see cref="ChatRoutePlan"/> has failed,
-    /// this delegate receives the route context and the registered models not already in the plan, and returns
-    /// the order in which to try them. When <see langword="null"/>, the router only attempts the plan's models.
+    /// <param name="onFailure">
+    /// An optional failure delegate consulted when a route's dispatch throws before any output is committed. It
+    /// receives a <see cref="RouteFailureContext"/> (the failed route, the unclassified exception, the attempt
+    /// count, and the untried candidates still available in <see cref="RouteFailureContext.Remaining"/>) and
+    /// returns the routes to try next, in order: any subset of the survivors, in any order, optionally
+    /// reintroducing a capable candidate the plan omitted. Returning <see langword="null"/> or an empty list
+    /// stops routing and rethrows the exception. The delegate is invoked on every pre-commit failure, including
+    /// the final route's (so a stateful delegate — for example one that cools a route on an HTTP 429 — observes
+    /// every failure); returned routes are de-duplicated against those already attempted, so a returned route
+    /// that was already tried is dropped and routing always terminates. When <see langword="null"/>, the router
+    /// walks the plan's routes in order and rethrows once they are exhausted — the historical default. The
+    /// exception is passed unclassified: the delegate owns any status-code interpretation. For streaming this
+    /// applies only before the first update is produced; once a token is on the wire the router never re-routes.
+    /// A cancellation is never treated as a route failure and never reaches the delegate.
     /// </param>
-    /// <param name="capabilityGate">
-    /// When <see langword="true"/> (the default), the router narrows the candidate models to those that can satisfy
-    /// capabilities the request provably needs before the selector runs — a model with image content requires
-    /// <see cref="RoutingChatModelTraits.Vision"/>, and supplying tools requires <see cref="RoutingChatModelTraits.ToolCalling"/>.
-    /// The gate is soft: if no registered model declares a required capability, it falls through to the full set rather
-    /// than stranding the request. When <see langword="false"/>, every registered model is always a candidate.
+    /// <param name="capabilityDetector">
+    /// An optional capability detector. Given the request messages and options, it returns the capability tokens the
+    /// request provably requires; the router then narrows the candidate routes to those whose declared capabilities
+    /// (under <see cref="ChatModelCapabilities.PropertyKey"/> in <see cref="ChatRoute.AdditionalProperties"/>) are a
+    /// superset. When <see langword="null"/>, a default detector is used that requires
+    /// <see cref="ChatModelCapabilities.Vision"/> for image content and <see cref="ChatModelCapabilities.FunctionCalling"/>
+    /// for <see cref="AIFunctionDeclaration"/> tools. The gate is soft: if no registered route declares a required
+    /// capability, it falls through to the full set rather than stranding the request. Supply a detector that always
+    /// returns no tokens to disable the gate so every registered route is always a candidate.
     /// </param>
     public RoutingChatClient(
-        IReadOnlyList<RoutingChatModel> models,
+        IReadOnlyList<ChatRoute> routes,
         IChatRouteSelector? selector = null,
-        Func<ChatRouteContext, IReadOnlyList<RoutingChatModel>, IReadOnlyList<RoutingChatModel>>? fallback = null,
-        bool capabilityGate = true)
+        Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>? onFailure = null,
+        Func<IEnumerable<ChatMessage>, ChatOptions?, IReadOnlyCollection<string>>? capabilityDetector = null)
     {
-        _models = ValidateModels(models);
-        _modelList = new ReadOnlyCollection<RoutingChatModel>(_models);
+        _routes = ValidateRoutes(routes);
+        _routeList = new ReadOnlyCollection<ChatRoute>(_routes);
         _selector = selector;
-        _fallback = fallback;
-        _capabilityGate = capabilityGate;
+        _onFailure = onFailure;
+        _capabilityDetector = capabilityDetector ?? DefaultCapabilityDetector;
     }
 
     /// <inheritdoc/>
@@ -183,39 +216,54 @@ public class RoutingChatClient : IChatClient
         using Activity? routeActivity = _activitySource.StartActivity(RouteActivityName);
 
         IEnumerable<ChatMessage> normalizedMessages = NormalizeMessages(messages);
-        IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
+        IReadOnlyList<ChatRoute> candidates = GetCandidateRoutes(normalizedMessages, options);
         var context = new ChatRouteContext(normalizedMessages, options, candidates);
         ChatRoutePlan plan = await RunSelectorAsync(context, cancellationToken);
         RecordDecisionEvent(plan);
 
-        RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
-        for (int i = 0; i < ordered.Length; i++)
+        List<ChatRoute> queue = DedupPlan(plan);
+        if (queue.Count == 0)
         {
-            RoutingChatModel model = ValidateRoutedModel(ordered[i]);
-            ChatOptions? forwarded = CreateForwardedOptions(model, options);
+            throw new InvalidOperationException("Routing produced no model to invoke.");
+        }
+
+        var tried = new HashSet<ChatRoute>();
+        int attempt = 0;
+        for (int i = 0; i < queue.Count; i++)
+        {
+            ChatRoute route = ValidateRoutedRoute(queue[i]);
+            if (!tried.Add(route))
+            {
+                continue; // defensive: a route is attempted at most once per request
+            }
+
+            attempt++;
+            ChatOptions? forwarded = CreateForwardedOptions(route, options);
             long startTimestamp = Stopwatch.GetTimestamp();
 
             try
             {
-                ChatResponse response = await model.Client!.GetResponseAsync(normalizedMessages, forwarded, cancellationToken);
-                RecordAttemptEvent(i + 1, model, AttemptOutcomeSuccess, startTimestamp, error: null);
-                StampResponse(response, model);
+                ChatResponse response = await route.Client!.GetResponseAsync(normalizedMessages, forwarded, cancellationToken);
+                RecordAttemptEvent(attempt, route, AttemptOutcomeSuccess, startTimestamp, error: null);
+                StampResponse(response, route);
                 return response;
-            }
-            catch (Exception ex) when (i < ordered.Length - 1 && !cancellationToken.IsCancellationRequested)
-            {
-                RecordAttemptEvent(i + 1, model, AttemptOutcomeFallback, startTimestamp, ex);
-
-                // Fall back to the next model in the attempt order.
             }
             catch (Exception ex)
             {
-                RecordAttemptEvent(i + 1, model, AttemptOutcomeError, startTimestamp, ex);
-                throw;
+                List<ChatRoute>? next = NextAfterFailure(route, ex, attempt, queue, i, tried, candidates, options, normalizedMessages, cancellationToken);
+                if (next is null)
+                {
+                    RecordAttemptEvent(attempt, route, AttemptOutcomeError, startTimestamp, ex);
+                    throw;
+                }
+
+                RecordAttemptEvent(attempt, route, AttemptOutcomeFallback, startTimestamp, ex);
+                queue = next;
+                i = -1; // iterate the freshly-computed queue from the start
             }
         }
 
-        // Unreachable: the loop above always returns or rethrows on the final model.
+        // Unreachable: the loop above returns on success or rethrows when no route remains to try.
         throw new InvalidOperationException("Routing produced no model to invoke.");
     }
 
@@ -232,54 +280,65 @@ public class RoutingChatClient : IChatClient
         using Activity? routeActivity = _activitySource.StartActivity(RouteActivityName);
 
         IEnumerable<ChatMessage> normalizedMessages = NormalizeMessages(messages);
-        IReadOnlyList<RoutingChatModel> candidates = GetCandidateModels(normalizedMessages, options);
+        IReadOnlyList<ChatRoute> candidates = GetCandidateRoutes(normalizedMessages, options);
         var context = new ChatRouteContext(normalizedMessages, options, candidates);
         ChatRoutePlan plan = await RunSelectorAsync(context, cancellationToken);
         RecordDecisionEvent(plan);
 
-        RoutingChatModel[] ordered = BuildAttemptOrder(plan, context, candidates);
+        List<ChatRoute> queue = DedupPlan(plan);
 
         // Mirror the non-streaming path's invariant: a plan always carries at least one model, so an empty
         // attempt order is unreachable today. Guard it anyway so both paths fail identically rather than the
         // stream silently completing empty if a future selector/gate change ever yields zero attempts.
-        if (ordered.Length == 0)
+        if (queue.Count == 0)
         {
             throw new InvalidOperationException("Routing produced no model to invoke.");
         }
 
-        for (int i = 0; i < ordered.Length; i++)
+        var tried = new HashSet<ChatRoute>();
+        int attempt = 0;
+        for (int i = 0; i < queue.Count; i++)
         {
-            RoutingChatModel model = ValidateRoutedModel(ordered[i]);
-            ChatOptions? forwarded = CreateForwardedOptions(model, options);
+            ChatRoute route = ValidateRoutedRoute(queue[i]);
+            if (!tried.Add(route))
+            {
+                continue; // defensive: a route is attempted at most once per request
+            }
+
+            attempt++;
+            ChatOptions? forwarded = CreateForwardedOptions(route, options);
             long startTimestamp = Stopwatch.GetTimestamp();
 
             IAsyncEnumerator<ChatResponseUpdate> enumerator =
-                model.Client!.GetStreamingResponseAsync(normalizedMessages, forwarded, cancellationToken).GetAsyncEnumerator(cancellationToken);
+                route.Client!.GetStreamingResponseAsync(normalizedMessages, forwarded, cancellationToken).GetAsyncEnumerator(cancellationToken);
 
             bool hasFirst;
             try
             {
-                // Fallback applies only until the first update is produced.
+                // Failure handling applies only until the first update is produced.
                 hasFirst = await enumerator.MoveNextAsync();
-            }
-            catch (Exception ex) when (i < ordered.Length - 1 && !cancellationToken.IsCancellationRequested)
-            {
-                RecordAttemptEvent(i + 1, model, AttemptOutcomeFallback, startTimestamp, ex);
-                await enumerator.DisposeAsync();
-                continue;
             }
             catch (Exception ex)
             {
-                RecordAttemptEvent(i + 1, model, AttemptOutcomeError, startTimestamp, ex);
+                List<ChatRoute>? next = NextAfterFailure(route, ex, attempt, queue, i, tried, candidates, options, normalizedMessages, cancellationToken);
+                RecordAttemptEvent(attempt, route, next is null ? AttemptOutcomeError : AttemptOutcomeFallback, startTimestamp, ex);
                 await enumerator.DisposeAsync();
-                throw;
+
+                if (next is null)
+                {
+                    throw;
+                }
+
+                queue = next;
+                i = -1; // iterate the freshly-computed queue from the start
+                continue;
             }
 
             // The first token committed this model: from the router's perspective the attempt succeeded, and
             // the recorded duration is its time-to-first-token. Mid-stream failures past here are not a routing
             // fallback decision, so they are not recorded as attempts.
-            RecordAttemptEvent(i + 1, model, AttemptOutcomeSuccess, startTimestamp, error: null);
-            StampActivity(model);
+            RecordAttemptEvent(attempt, route, AttemptOutcomeSuccess, startTimestamp, error: null);
+            StampActivity(route);
             try
             {
                 bool stamped = false;
@@ -288,7 +347,7 @@ public class RoutingChatClient : IChatClient
                     ChatResponseUpdate update = enumerator.Current;
                     if (!stamped)
                     {
-                        StampUpdate(update, model);
+                        StampUpdate(update, route);
                         stamped = true;
                     }
 
@@ -351,9 +410,9 @@ public class RoutingChatClient : IChatClient
         if (disposing)
         {
             HashSet<IChatClient> disposedClients = [];
-            foreach (RoutingChatModel model in _models)
+            foreach (ChatRoute route in _routes)
             {
-                IChatClient client = model.Client!;
+                IChatClient client = route.Client!;
                 if (disposedClients.Add(client))
                 {
                     client.Dispose();
@@ -367,55 +426,78 @@ public class RoutingChatClient : IChatClient
             ? new ValueTask<ChatRoutePlan>(DefaultSelectRoute(context))
             : _selector.SelectRouteAsync(context, cancellationToken);
 
-    // The router's capability gate. Narrows the registered models to those that can satisfy capabilities the
-    // request provably needs, so every selector — and the fallback chain — only ever sees capable candidates.
-    // Only high-confidence signals are used (image content -> Vision, supplied tools -> ToolCalling); nothing
-    // is inferred from estimates. The gate is soft: when no registered model positively declares a required
-    // capability (sparse or incorrect trait metadata), it returns the full set rather than stranding the request.
-    private ReadOnlyCollection<RoutingChatModel> GetCandidateModels(IEnumerable<ChatMessage> messages, ChatOptions? options)
+    // The router's capability gate. Narrows the registered routes to those that can satisfy the capabilities the
+    // request provably needs, so every selector — and the fallback chain — only ever sees capable candidates. The
+    // required tokens come from the injected capability detector; a route declares the tokens it supports under
+    // ChatModelCapabilities.PropertyKey in its AdditionalProperties, and a route qualifies only when its declared
+    // set is a superset of the required set. The gate is soft: when no registered route positively declares a
+    // required capability (sparse metadata), it returns the full set rather than stranding the request. A detector
+    // that always returns no tokens disables the gate entirely.
+    private ReadOnlyCollection<ChatRoute> GetCandidateRoutes(IEnumerable<ChatMessage> messages, ChatOptions? options)
     {
-        if (!_capabilityGate)
+        IReadOnlyCollection<string> required = _capabilityDetector(messages, options);
+        if (required.Count == 0)
         {
-            return _modelList;
+            return _routeList;
         }
 
-        RoutingChatModelTraits required = GetRequiredCapabilities(messages, options);
-        if (required == RoutingChatModelTraits.None)
+        List<ChatRoute>? capable = null;
+        foreach (ChatRoute route in _routes)
         {
-            return _modelList;
-        }
-
-        List<RoutingChatModel>? capable = null;
-        foreach (RoutingChatModel model in _models)
-        {
-            if ((model.Traits & required) == required)
+            if (SupportsAllCapabilities(route, required))
             {
-                (capable ??= new List<RoutingChatModel>(_models.Length)).Add(model);
+                (capable ??= new List<ChatRoute>(_routes.Length)).Add(route);
             }
         }
 
-        return capable is { Count: > 0 } ? new ReadOnlyCollection<RoutingChatModel>(capable) : _modelList;
+        return capable is { Count: > 0 } ? new ReadOnlyCollection<ChatRoute>(capable) : _routeList;
     }
 
-    // Derives the capabilities a request provably requires, using only signals that cannot be wrong about the
-    // request itself: a message carrying image content needs a vision model, and supplying tools needs a
-    // tool-calling model. Fuzzier dimensions (such as "reasoning") are deliberately excluded — they are a
-    // selector's job to weigh, not a hard correctness gate.
-    private static RoutingChatModelTraits GetRequiredCapabilities(IEnumerable<ChatMessage> messages, ChatOptions? options)
+    // The default capability detector. Derives the capabilities a request provably requires using only signals that
+    // cannot be wrong about the request itself: a message carrying image content needs a vision route, and supplying
+    // function-declaration tools needs a function-calling route. Fuzzier dimensions (such as "reasoning") are
+    // deliberately excluded — they are a selector's job to weigh, not a hard correctness gate. Provider-hosted tools
+    // (web search, code interpreter) are also excluded: whether they work is a property of the deployment, not the
+    // request, so require them via a custom detector when the lineup is heterogeneous in that capability.
+    private static IReadOnlyCollection<string> DefaultCapabilityDetector(IEnumerable<ChatMessage> messages, ChatOptions? options)
     {
-        RoutingChatModelTraits required = RoutingChatModelTraits.None;
+        List<string>? required = null;
 
-        if (options?.Tools is { Count: > 0 })
+        if (options?.Tools is { Count: > 0 } tools && tools.OfType<AIFunctionDeclaration>().Any())
         {
-            required |= RoutingChatModelTraits.ToolCalling;
+            (required ??= []).Add(ChatModelCapabilities.FunctionCalling);
         }
 
         if (MessagesContainImage(messages))
         {
-            required |= RoutingChatModelTraits.Vision;
+            (required ??= []).Add(ChatModelCapabilities.Vision);
         }
 
-        return required;
+        return required is not null ? required : Array.Empty<string>();
+    }
+
+    // Determines whether a route's declared capability tokens (under ChatModelCapabilities.PropertyKey in its
+    // AdditionalProperties) are a superset of the required tokens. A route that declares no tokens can satisfy only
+    // a request that requires none, so it never matches a non-empty requirement here.
+    private static bool SupportsAllCapabilities(ChatRoute route, IReadOnlyCollection<string> required)
+    {
+        if (route.AdditionalProperties is null ||
+            !route.AdditionalProperties.TryGetValue(ChatModelCapabilities.PropertyKey, out object? value) ||
+            value is not IEnumerable<string> tokens)
+        {
+            return false;
+        }
+
+        var supported = new HashSet<string>(tokens, StringComparer.OrdinalIgnoreCase);
+        foreach (string token in required)
+        {
+            if (!supported.Contains(token))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool MessagesContainImage(IEnumerable<ChatMessage> messages)
@@ -429,6 +511,7 @@ public class RoutingChatClient : IChatClient
                 {
                     case DataContent data when data.HasTopLevelMediaType("image"):
                     case UriContent uri when uri.HasTopLevelMediaType("image"):
+                    case HostedFileContent file when file.HasTopLevelMediaType("image"):
                         return true;
                 }
             }
@@ -437,56 +520,123 @@ public class RoutingChatClient : IChatClient
         return false;
     }
 
-    // Builds the ordered sequence the router actually attempts: the selected plan's models first, then —
-    // if a fallback policy is configured — the candidate models the plan omitted, in the order the policy
-    // returns. Duplicates and models already in the plan are dropped so each candidate is tried at most once.
-    // The fallback tail is drawn from the same gated candidate set the selector saw, never the full registry.
-    private RoutingChatModel[] BuildAttemptOrder(ChatRoutePlan plan, ChatRouteContext context, IReadOnlyList<RoutingChatModel> candidates)
+    // The initial attempt queue: the selected plan's routes in order, de-duplicated so each is attempted at most
+    // once. The router never eagerly appends non-plan candidates here — reaching beyond the plan on failure is
+    // the failure delegate's job (see NextAfterFailure), so a request with no failures pays nothing for it.
+    private static List<ChatRoute> DedupPlan(ChatRoutePlan plan)
     {
-        IReadOnlyList<RoutingChatModel> primary = plan.OrderedModels;
-        if (_fallback is null)
+        IReadOnlyList<ChatRoute> ordered = plan.OrderedRoutes;
+        var seen = new HashSet<ChatRoute>();
+        var result = new List<ChatRoute>(ordered.Count);
+        foreach (ChatRoute route in ordered)
         {
-            var planOnly = new RoutingChatModel[primary.Count];
-            for (int i = 0; i < primary.Count; i++)
+            if (route is not null && seen.Add(route))
             {
-                planOnly[i] = primary[i];
-            }
-
-            return planOnly;
-        }
-
-        var seen = new HashSet<RoutingChatModel>();
-        var result = new List<RoutingChatModel>(candidates.Count);
-        foreach (RoutingChatModel model in primary)
-        {
-            if (seen.Add(model))
-            {
-                result.Add(model);
+                result.Add(route);
             }
         }
 
-        var remaining = new List<RoutingChatModel>(candidates.Count);
-        foreach (RoutingChatModel model in candidates)
+        return result;
+    }
+
+    // Decides what to attempt after queue[failedIndex] threw before committing output, or null to rethrow.
+    // A cancellation is the caller's decision, not a route failure, so it never falls back. With no failure
+    // delegate the historical rule applies: continue through the remaining planned routes, rethrow once none
+    // remain. Otherwise the delegate is consulted with the untried candidates (the plan tail first, then any
+    // other gated candidate) and returns the routes to try next; its result is validated to registered,
+    // not-yet-attempted routes so routing always terminates, and an empty result means rethrow.
+    private List<ChatRoute>? NextAfterFailure(
+        ChatRoute failedRoute,
+        Exception exception,
+        int attemptNumber,
+        List<ChatRoute> queue,
+        int failedIndex,
+        HashSet<ChatRoute> tried,
+        IReadOnlyList<ChatRoute> candidates,
+        ChatOptions? options,
+        IEnumerable<ChatMessage> messages,
+        CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
         {
-            if (!seen.Contains(model))
+            return null;
+        }
+
+        if (_onFailure is null)
+        {
+            // Historical default: walk the remaining planned routes only, never the non-plan candidates.
+            List<ChatRoute> tail = BuildQueueTail(queue, failedIndex + 1, tried);
+            return tail.Count > 0 ? tail : null;
+        }
+
+        List<ChatRoute> remaining = BuildRemaining(queue, failedIndex + 1, candidates, tried);
+        var failureContext = new RouteFailureContext(failedRoute, exception, attemptNumber, remaining, options, messages);
+        IReadOnlyList<ChatRoute>? next = _onFailure(failureContext);
+        if (next is null)
+        {
+            return null;
+        }
+
+        List<ChatRoute> sanitized = SanitizeNext(next, tried);
+        return sanitized.Count > 0 ? sanitized : null;
+    }
+
+    // The untried, de-duplicated tail of the current queue, from startIndex onward.
+    private static List<ChatRoute> BuildQueueTail(List<ChatRoute> queue, int startIndex, HashSet<ChatRoute> tried)
+    {
+        var seen = new HashSet<ChatRoute>();
+        var tail = new List<ChatRoute>(Math.Max(0, queue.Count - startIndex));
+        for (int j = startIndex; j < queue.Count; j++)
+        {
+            ChatRoute route = queue[j];
+            if (!tried.Contains(route) && seen.Add(route))
             {
-                remaining.Add(model);
+                tail.Add(route);
             }
         }
 
-        IReadOnlyList<RoutingChatModel>? tail = _fallback(context, remaining);
-        if (tail is not null)
+        return tail;
+    }
+
+    // The failure delegate's lookahead: every untried route still worth attempting, in the router's default
+    // order — the current queue's remaining tail first (preserving the planned order), then any other gated
+    // candidate the plan omitted. Drawn from the gated candidate set, so capability filtering still holds.
+    private static List<ChatRoute> BuildRemaining(List<ChatRoute> queue, int startIndex, IReadOnlyList<ChatRoute> candidates, HashSet<ChatRoute> tried)
+    {
+        List<ChatRoute> remaining = BuildQueueTail(queue, startIndex, tried);
+        var seen = new HashSet<ChatRoute>(remaining);
+        foreach (ChatRoute route in candidates)
         {
-            foreach (RoutingChatModel model in tail)
+            if (!tried.Contains(route) && seen.Add(route))
             {
-                if (model is not null && seen.Add(model))
-                {
-                    result.Add(model);
-                }
+                remaining.Add(route);
             }
         }
 
-        return result.ToArray();
+        return remaining;
+    }
+
+    // Validates the routes a failure delegate returned: each must be a registered route (ValidateRoutedRoute
+    // throws otherwise), and any already attempted or duplicated is dropped so the attempt set strictly grows.
+    private List<ChatRoute> SanitizeNext(IReadOnlyList<ChatRoute> next, HashSet<ChatRoute> tried)
+    {
+        var seen = new HashSet<ChatRoute>();
+        var result = new List<ChatRoute>(next.Count);
+        foreach (ChatRoute route in next)
+        {
+            if (route is null)
+            {
+                continue;
+            }
+
+            _ = ValidateRoutedRoute(route);
+            if (!tried.Contains(route) && seen.Add(route))
+            {
+                result.Add(route);
+            }
+        }
+
+        return result;
     }
 
     // The opinion-free default: honor an explicit ModelId, otherwise the first registered model.
@@ -495,91 +645,94 @@ public class RoutingChatClient : IChatClient
         string? modelId = context.Options?.ModelId;
         if (!string.IsNullOrEmpty(modelId))
         {
-            foreach (RoutingChatModel model in context.Models)
+            foreach (ChatRoute route in context.Routes)
             {
-                if (string.Equals(model.ModelId, modelId, StringComparison.Ordinal) ||
-                    string.Equals(model.Name, modelId, StringComparison.Ordinal))
+                if (string.Equals(route.ModelId, modelId, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(route.Name, modelId, StringComparison.OrdinalIgnoreCase))
                 {
-                    return new ChatRoutePlan(model);
+                    return new ChatRoutePlan(route);
                 }
             }
         }
 
-        return new ChatRoutePlan(context.Models[0]);
+        return new ChatRoutePlan(context.Routes[0]);
     }
 
-    private static ChatOptions? CreateForwardedOptions(RoutingChatModel model, ChatOptions? options)
+    private static ChatOptions? CreateForwardedOptions(ChatRoute route, ChatOptions? options)
     {
-        // The router forwards the caller's options, supplying the chosen provider model id only when the caller did
-        // not pin one. It is applied on a clone, leaving the caller's options untouched.
-        if (model.ModelId is null || options?.ModelId is not null)
+        // The router forwards the caller's options on a clone (never mutating the caller's instance), supplying
+        // the chosen provider model id when the caller did not pin one via ChatOptions.ModelId. When no
+        // adjustment is needed, the caller's options are forwarded as-is.
+        if (route.ModelId is null || options?.ModelId is not null)
         {
             return options;
         }
 
         ChatOptions forwarded = options?.Clone() ?? new ChatOptions();
-        forwarded.ModelId = model.ModelId;
+        forwarded.ModelId = route.ModelId;
         return forwarded;
     }
 
-    private static void StampResponse(ChatResponse response, RoutingChatModel model)
+    private static void StampResponse(ChatResponse response, ChatRoute route)
     {
         if (response is null)
         {
             return;
         }
 
-        StampIdentity(response.AdditionalProperties ??= [], model);
-        StampActivity(model);
+        StampIdentity(response.AdditionalProperties ??= [], route);
+        StampActivity(route);
     }
 
-    private static void StampUpdate(ChatResponseUpdate update, RoutingChatModel model) =>
-        StampIdentity(update.AdditionalProperties ??= [], model);
+    private static void StampUpdate(ChatResponseUpdate update, ChatRoute route) =>
+        StampIdentity(update.AdditionalProperties ??= [], route);
 
     // Records "who answered" (identity) and "how it got there" (path) onto a response/update's properties.
     //
-    // Identity (SelectedModelNameKey/IdKey/ProviderNameKey) is written first-writer-wins. When routers nest, the
-    // innermost router stamps first — with the concrete leaf model that actually produced the tokens — and any
-    // outer router's later stamp over the same object is skipped. This keeps identity leaf-truthful (correct for
-    // billing, the "routed to" badge, and model-pinning) rather than being overwritten by an intermediate router
-    // whose own ModelId/ProviderName are null. The three keys move together so identity is never half-written.
+    // Identity (SelectedRouteNameKey/SelectedModelIdKey/SelectedProviderNameKey) is written first-writer-wins. When
+    // routers nest, the innermost router stamps first — with the concrete leaf route that actually produced the
+    // tokens — and any outer router's later stamp over the same object is skipped. This keeps identity leaf-truthful
+    // (the "routed to" badge and route-pinning) rather than being overwritten by an intermediate router whose own
+    // ModelId/ProviderName are null. Cost/usage attribution should key off SelectedModelIdKey — the concrete billed
+    // model — not the route name, which is a router-local alias. The three keys move together so identity is never
+    // half-written.
     //
     // Path (SelectedPathKey) is complementary and accumulates: each router prepends the name of the model it
     // selected as the response unwinds, yielding the full winning route to any depth (for example
     // "Complexity/gpt-4o-mini"). Identity answers "who"; path answers "how it got there" — two concerns kept in
     // two keys rather than overloaded onto one scalar, which is what previously corrupted identity under nesting.
-    private static void StampIdentity(AdditionalPropertiesDictionary props, RoutingChatModel model)
+    private static void StampIdentity(AdditionalPropertiesDictionary props, ChatRoute route)
     {
-        if (!props.ContainsKey(SelectedModelNameKey))
+        if (!props.ContainsKey(SelectedRouteNameKey))
         {
-            props[SelectedModelNameKey] = model.Name;
-            props[SelectedModelIdKey] = model.ModelId;
-            props[SelectedProviderNameKey] = model.ProviderName;
+            props[SelectedRouteNameKey] = route.Name;
+            props[SelectedModelIdKey] = route.ModelId;
+            props[SelectedProviderNameKey] = route.ProviderName;
         }
 
         props[SelectedPathKey] = props.TryGetValue(SelectedPathKey, out string? prior) && prior is not null
-            ? $"{model.Name}/{prior}"
-            : model.Name;
+            ? $"{route.Name}/{prior}"
+            : route.Name;
     }
 
-    private static void StampActivity(RoutingChatModel model)
+    private static void StampActivity(ChatRoute route)
     {
         Activity? activity = Activity.Current;
         if (activity is not null)
         {
-            _ = activity.SetTag(SelectedModelNameKey, model.Name);
-            if (model.ModelId is not null)
+            _ = activity.SetTag(SelectedRouteNameKey, route.Name);
+            if (route.ModelId is not null)
             {
-                _ = activity.SetTag(SelectedModelIdKey, model.ModelId);
+                _ = activity.SetTag(SelectedModelIdKey, route.ModelId);
             }
         }
     }
 
-    // Adds one routing.attempt event to the ambient span describing a single model attempt: its order, model
+    // Adds one routing.attempt event to the ambient span describing a single attempt: its order, route and model
     // identity, outcome (success/fallback/error), elapsed time, and — on failure — the exception type. This is
     // the per-attempt timeline that StampActivity (winner-only) does not capture. It is a no-op unless a
     // listener is recording the current activity, so the cost is only paid when telemetry is being collected.
-    private static void RecordAttemptEvent(int ordinal, RoutingChatModel model, string outcome, long startTimestamp, Exception? error)
+    private static void RecordAttemptEvent(int ordinal, ChatRoute route, string outcome, long startTimestamp, Exception? error)
     {
         Activity? activity = Activity.Current;
         if (activity is not { IsAllDataRequested: true })
@@ -590,19 +743,19 @@ public class RoutingChatClient : IChatClient
         var tags = new ActivityTagsCollection
         {
             [AttemptOrdinalKey] = ordinal,
-            [AttemptModelKey] = model.Name,
+            [AttemptRouteKey] = route.Name,
             [AttemptOutcomeKey] = outcome,
             [AttemptDurationMsKey] = GetElapsedTime(startTimestamp).TotalMilliseconds,
         };
 
-        if (model.ModelId is not null)
+        if (route.ModelId is not null)
         {
-            tags[AttemptModelIdKey] = model.ModelId;
+            tags[AttemptModelIdKey] = route.ModelId;
         }
 
-        if (model.ProviderName is not null)
+        if (route.ProviderName is not null)
         {
-            tags[AttemptProviderKey] = model.ProviderName;
+            tags[AttemptProviderKey] = route.ProviderName;
         }
 
         if (error is not null)
@@ -621,7 +774,7 @@ public class RoutingChatClient : IChatClient
         new((long)((Stopwatch.GetTimestamp() - startingTimestamp) * ((double)TimeSpan.TicksPerSecond / Stopwatch.Frequency)));
 #endif
 
-    // Adds one routing.decision event to the ambient span describing the selected plan: the primary model and any
+    // Adds one routing.decision event to the ambient span describing the selected plan: the primary route and any
     // decision-rationale the selector attached (complexity tier, semantic score, ...). Fires once per request.
     // No-op unless a listener is recording the current activity.
     private static void RecordDecisionEvent(ChatRoutePlan plan)
@@ -634,7 +787,7 @@ public class RoutingChatClient : IChatClient
 
         var tags = new ActivityTagsCollection
         {
-            [SelectedModelNameKey] = plan.OrderedModels[0].Name,
+            [SelectedRouteNameKey] = plan.OrderedRoutes[0].Name,
         };
 
         if (plan.DecisionMetadata is { } metadata)
@@ -651,44 +804,103 @@ public class RoutingChatClient : IChatClient
     private static IEnumerable<ChatMessage> NormalizeMessages(IEnumerable<ChatMessage> messages) =>
         messages as IReadOnlyList<ChatMessage> ?? messages.ToArray();
 
-    private RoutingChatModel ValidateRoutedModel(RoutingChatModel model)
+    private ChatRoute ValidateRoutedRoute(ChatRoute route)
     {
-        if (model is null || Array.IndexOf(_models, model) < 0)
+        if (route is null || Array.IndexOf(_routes, route) < 0)
         {
             Throw.InvalidOperationException(
-                $"The {nameof(RoutingChatClient)} selector must route to one of the registered models.");
+                $"The {nameof(RoutingChatClient)} selector must route to one of the registered routes.");
         }
 
-        return model;
+        return route;
     }
 
-    private static RoutingChatModel[] ValidateModels(IReadOnlyList<RoutingChatModel> models)
+    private static ChatRoute[] ValidateRoutes(IReadOnlyList<ChatRoute> routes)
     {
-        _ = Throw.IfNull(models);
+        _ = Throw.IfNull(routes);
 
-        if (models.Count == 0)
+        if (routes.Count == 0)
         {
-            Throw.ArgumentException(nameof(models), "At least one model must be provided.");
+            Throw.ArgumentException(nameof(routes), "At least one route must be provided.");
         }
 
-        var result = new RoutingChatModel[models.Count];
-        for (int i = 0; i < models.Count; i++)
+        var result = new ChatRoute[routes.Count];
+        for (int i = 0; i < routes.Count; i++)
         {
-            result[i] = Throw.IfNull(models[i]);
+            result[i] = Throw.IfNull(routes[i]);
             if (result[i].Client is null)
             {
-                Throw.ArgumentException(nameof(models), $"The model '{result[i].Name}' must be bound to an IChatClient.");
+                Throw.ArgumentException(nameof(routes), $"The route '{result[i].Name}' must be bound to an IChatClient.");
             }
 
             for (int j = 0; j < i; j++)
             {
                 if (StringComparer.OrdinalIgnoreCase.Equals(result[j].Name, result[i].Name))
                 {
-                    Throw.ArgumentException(nameof(models), $"A model named '{result[i].Name}' has already been added.");
+                    Throw.ArgumentException(nameof(routes), $"A route named '{result[i].Name}' has already been added.");
                 }
             }
         }
 
         return result;
     }
+}
+
+#pragma warning disable SA1402 // File may only contain a single type — the failure-delegate vocabulary lives beside the mechanism that consults it.
+
+/// <summary>
+/// The inputs a <see cref="RoutingChatClient"/> failure delegate receives when a route's dispatch throws before
+/// any output is committed, together with the untried routes still available to attempt. The exception is passed
+/// unclassified: the delegate owns any interpretation of it — for example mapping an HTTP status code to a
+/// cooldown, or pruning every route that shares the failed route's provider on an authentication error.
+/// </summary>
+[Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
+public sealed class RouteFailureContext
+{
+    /// <summary>Initializes a new instance of the <see cref="RouteFailureContext"/> class.</summary>
+    /// <param name="route">The route whose dispatch threw.</param>
+    /// <param name="exception">The exception the route threw, unclassified.</param>
+    /// <param name="attemptNumber">The 1-based count of routes attempted so far this request, including this one.</param>
+    /// <param name="remaining">The untried routes still available to attempt, in the router's default order.</param>
+    /// <param name="options">The chat options for the request, if any.</param>
+    /// <param name="messages">The chat messages being routed.</param>
+    public RouteFailureContext(
+        ChatRoute route,
+        Exception exception,
+        int attemptNumber,
+        IReadOnlyList<ChatRoute> remaining,
+        ChatOptions? options,
+        IEnumerable<ChatMessage> messages)
+    {
+        Route = route;
+        Exception = exception;
+        AttemptNumber = attemptNumber;
+        Remaining = remaining;
+        Options = options;
+        Messages = messages;
+    }
+
+    /// <summary>Gets the route whose dispatch threw.</summary>
+    public ChatRoute Route { get; }
+
+    /// <summary>Gets the exception the route threw, unclassified.</summary>
+    public Exception Exception { get; }
+
+    /// <summary>Gets the 1-based count of routes attempted so far this request, including the one that just failed.</summary>
+    public int AttemptNumber { get; }
+
+    /// <summary>
+    /// Gets the untried routes still available to attempt, in the router's default order: the current plan's
+    /// remaining routes first, then any other capable candidate the plan omitted. The failure delegate returns
+    /// the routes to try next — any subset of these, in any order, is valid; returning an empty list (or
+    /// <see langword="null"/>) stops routing and rethrows. Returned routes are de-duplicated and any already
+    /// attempted are dropped, so the router always terminates.
+    /// </summary>
+    public IReadOnlyList<ChatRoute> Remaining { get; }
+
+    /// <summary>Gets the chat options for the request, if any.</summary>
+    public ChatOptions? Options { get; }
+
+    /// <summary>Gets the chat messages being routed.</summary>
+    public IEnumerable<ChatMessage> Messages { get; }
 }

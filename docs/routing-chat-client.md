@@ -57,13 +57,19 @@ Because each candidate is itself an `IChatClient`, a routing pipeline forms a **
 
 ## Capability gate
 
-Before any selector runs, the router applies a **soft capability gate**. It narrows the
-candidate models to those that can satisfy capabilities the request **provably** needs, using
-only high-confidence signals derived from the request itself — never an estimate or a guess:
+Before any selector runs, the router applies a **soft capability gate**. It asks an injectable
+`capabilityDetector` delegate which capability tokens the request **provably** needs, then narrows
+the candidate routes to those whose declared tokens are a superset. A route declares its supported
+tokens in `ChatRoute.AdditionalProperties` under `ChatModelCapabilities.PropertyKey`
+(`"capabilities"`).
+
+When `capabilityDetector` is `null`, the default detector uses only high-confidence signals derived
+from the request itself — never an estimate or a guess:
 
 - a message carrying image content (`DataContent`/`UriContent` with an `image/*` media type)
-  requires `RoutingChatModelTraits.Vision`;
-- supplying `ChatOptions.Tools` requires `RoutingChatModelTraits.ToolCalling`.
+  requires `ChatModelCapabilities.Vision` (`"vision"`);
+- a supplied `AIFunctionDeclaration` tool requires `ChatModelCapabilities.FunctionCalling`
+  (`"function_calling"`).
 
 This is a **correctness filter**, not a quality signal: it is shared by every selector *and*
 the fallback chain, so a selector never has to re-implement "can this model even handle the
@@ -72,12 +78,12 @@ excluded — judging the request is a selector's job.
 
 The gate is **soft** in two ways:
 
-- **Fallthrough:** if no registered model positively declares a required capability (sparse or
-  incorrect trait metadata), the gate returns the full candidate set rather than stranding the
-  request. A model only gets excluded when at least one *other* model declares the capability.
-- **Bypass:** the `capabilityGate: false` constructor argument disables it globally for the
-  router (it is on by default). Use this when you don't trust the catalog's trait metadata and
-  want the selector/`ModelId` to have the final say.
+- **Fallthrough:** if no registered route positively declares a required capability (sparse or
+  incorrect capability metadata), the gate returns the full candidate set rather than stranding the
+  request. A route only gets excluded when at least one *other* route declares the capability.
+- **Bypass:** supply `capabilityDetector: static (_, _) => Array.Empty<string>()` so every route is
+  always a candidate. Use this when you don't trust the catalog's capability metadata and want the
+  selector/`ModelId` to have the final say.
 
 ## Building a router
 
@@ -95,20 +101,28 @@ IChatClient gpt4oMiniClient = ...;
 IChatClient privateModelClient = ...;
 
 // Optional: a catalog of reusable model metadata you can bind to clients later.
-var catalog = new RoutingChatModelCatalog(
+var catalog = new ChatRouteCatalog(
 [
-    new RoutingChatModel(
+    new ChatRoute(
         name: "openai:gpt-5.3",
         providerName: "openai",
         modelId: "gpt-5.3",
-        traits: RoutingChatModelTraits.Reasoning | RoutingChatModelTraits.ToolCalling,
+        additionalProperties: new AdditionalPropertiesDictionary
+        {
+            [ChatModelCapabilities.PropertyKey] =
+                new[] { ChatModelCapabilities.Reasoning, ChatModelCapabilities.FunctionCalling },
+        },
         inputTokenCostPerMillion: 10,
         outputTokenCostPerMillion: 30),
-    new RoutingChatModel(
+    new ChatRoute(
         name: "openai:gpt-4o-mini",
         providerName: "openai",
         modelId: "gpt-4o-mini",
-        traits: RoutingChatModelTraits.ToolCalling | RoutingChatModelTraits.Vision,
+        additionalProperties: new AdditionalPropertiesDictionary
+        {
+            [ChatModelCapabilities.PropertyKey] =
+                new[] { ChatModelCapabilities.FunctionCalling, ChatModelCapabilities.Vision },
+        },
         inputTokenCostPerMillion: 1,
         outputTokenCostPerMillion: 3,
         typicalLatency: TimeSpan.FromMilliseconds(400)),
@@ -119,7 +133,7 @@ IChatClient root = new RoutingChatClient(
 [
     catalog.Get("openai:gpt-5.3").WithClient(gpt53Client),
     catalog.Get("openai:gpt-4o-mini").WithClient(gpt4oMiniClient),
-    new RoutingChatModel(
+    new ChatRoute(
         name: "private-fast-model",
         providerName: "contoso",
         modelId: "contoso-fast",
@@ -145,36 +159,44 @@ with the standard builder — no routing-specific registration helper is require
 ```csharp
 services.AddChatClient(sp => new RoutingChatClient(
 [
-    new RoutingChatModel("openai:gpt-5.3", client: sp.GetRequiredKeyedService<IChatClient>("gpt-5.3")),
-    new RoutingChatModel("openai:gpt-4o-mini", client: sp.GetRequiredKeyedService<IChatClient>("gpt-4o-mini")),
+    new ChatRoute("openai:gpt-5.3", client: sp.GetRequiredKeyedService<IChatClient>("gpt-5.3")),
+    new ChatRoute("openai:gpt-4o-mini", client: sp.GetRequiredKeyedService<IChatClient>("gpt-4o-mini")),
 ]))
     .UseFunctionInvocation()
     .UseOpenTelemetry();
 ```
 
 
-The user-facing noun is **"model"** (`RoutingChatModel`). A `RoutingChatModel` carries optional
-**objective** metadata only — stable name, provider, model id, capability traits (`ToolCalling`,
-`Vision`, `Reasoning` — each readable straight from a provider catalog), input/output token
-cost, a context-window hint (`MaxInputTokens`), a latency hint, source URL, and update time. The
-metadata is advisory: the mechanism never interprets it, only a selector does.
+The user-facing noun is **"route"** (`ChatRoute`). A `ChatRoute` carries optional
+**objective** metadata only — stable route name, provider, model id, capability tokens declared
+under `ChatModelCapabilities.PropertyKey`, input/output token cost, a context-window hint
+(`MaxInputTokens`), a latency hint, source URL, and update time. The metadata is advisory: aside
+from the router's capability gate reading the well-known capability token set, only selectors decide
+how to use it.
 
 Subjective or custom dimensions (e.g., a quality score, benchmark results, region, or any
 provider-specific signal a selector needs) are **not** first-class fields. Put them in
-`AdditionalProperties` — the modular extension bag — and have your selector read them:
+`AdditionalProperties` under app-specific keys — the modular extension bag — and have your selector
+read them. Because capability tokens are open strings, applications can add their own objective
+tokens there too without waiting for a library change:
 
 ```csharp
-new RoutingChatModel(
+new ChatRoute(
     name: "openai:gpt-5.3",
     providerName: "openai",
     modelId: "gpt-5.3",
-    traits: RoutingChatModelTraits.Reasoning | RoutingChatModelTraits.ToolCalling,
-    additionalProperties: new() { ["quality"] = 0.95, ["region"] = "us-east" });
+    additionalProperties: new AdditionalPropertiesDictionary
+    {
+        [ChatModelCapabilities.PropertyKey] =
+            new[] { ChatModelCapabilities.Reasoning, ChatModelCapabilities.FunctionCalling, "legal_reviewed" },
+        ["quality"] = 0.95,
+        ["region"] = "us-east",
+    });
 ```
 
-The default ship keeps the first-class surface objective and small (provider-reported capability
-categories + cost + a latency slot); anything subjective lives in `AdditionalProperties` so it
-can evolve without changing the API.
+The default ship keeps the first-class surface objective and small (provider/model identity, cost,
+context, latency, provenance); capabilities and anything subjective live in `AdditionalProperties`
+so they can evolve without changing the API.
 
 ## Selectors (policy)
 
@@ -201,10 +223,10 @@ Inline delegates are supported by wrapping them with `ChatRouteSelector.Create` 
 result as the router's `selector`:
 
 ```csharp
-IChatRouteSelector sync  = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Models[0]));       // sync
+IChatRouteSelector sync  = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Routes[0]));       // sync
 IChatRouteSelector async = ChatRouteSelector.Create((ctx, ct) => SomeAsyncSelectionAsync(ctx, ct)); // async
 
-var router = new RoutingChatClient(models, selector: sync);
+var router = new RoutingChatClient(routes, selector: sync);
 ```
 
 A selector must route to one of the **registered** model instances; routing to an unknown
@@ -231,10 +253,10 @@ var selector = new ComplexityChatRouteSelector(
         [ChatComplexityTier.Complex]   = "gpt-4o",
         [ChatComplexityTier.Reasoning] = "o3",
     },
-    defaultModel: "gpt-4o");
+    defaultRoute: "gpt-4o");
 
 // Pass it as the router's selector:
-var router = new RoutingChatClient(models, selector: selector);
+var router = new RoutingChatClient(routes, selector: selector);
 ```
 
 ### How the complexity router works
@@ -344,7 +366,7 @@ var selector = new ComplexityChatRouteSelector(tierMap, options: options);
 `ClassifyTier(messages)` is public if you want the tier without routing. Because complexity
 routing is just another selector, it composes with the rest of the mechanism: response stamping
 and nesting all apply unchanged. Since a tier classifier picks exactly one model, its
-plan is a **single model** — to get fallback, pair it with the router's `UseFallback()` policy (see
+plan is a **single model** — to get fallback, pair it with the router's `onFailure` delegate (see
 [Fallback](#fallback-circuit-breaking) above), which owns the order in which the other models are
 tried. (Capability gating still applies — the router's soft capability gate runs before the tier
 classifier — but the classifier does not itself apply a context-window filter, so pair it with
@@ -353,11 +375,11 @@ capacity-aware tier mappings if a tier's model has a small context window.)
 ## Model metadata and currency
 
 Selectors need per-model facts (capabilities, context window, cost) and those facts change as
-providers ship models. `RoutingChatModel` carries advisory metadata for exactly this — traits,
+providers ship models. `ChatRoute` carries advisory metadata for exactly this — capability tokens,
 token cost, context window (`MaxInputTokens`), `SourceUri`, and `UpdatedAt` — which a
-`RoutingChatModelCatalog` can store as client-less entries and bind to a client later via
+`ChatRouteCatalog` can store as client-less entries and bind to a client later via
 `WithClient`. Mapping external catalog JSON (LiteLLM, GitHub Models, provider feeds, etc.) into
-`RoutingChatModel` entries is left to the caller, since catalog formats and provenance requirements
+`ChatRoute` entries is left to the caller, since catalog formats and provenance requirements
 differ.
 
 ## Fallback (circuit breaking)
@@ -365,17 +387,21 @@ differ.
 Fallback is split across the mechanism/policy line, mirroring selection itself:
 
 - **The plan (selector).** A selector returns a `ChatRoutePlan` of the models it prefers, primary
-  first. The router walks `ChatRoutePlan.OrderedModels`: if the primary throws, it tries the next,
+  first. The router walks `ChatRoutePlan.OrderedRoutes`: if the primary throws, it tries the next,
   and so on. A selector with a genuine ranking (such as the semantic router, which orders by
   descending similarity) emits a multi-model plan whose tail *is* a meaningful fallback chain.
-- **The fallback policy (router).** A selector that naturally picks a single model — a complexity
+- **The failure delegate (router).** A selector that naturally picks a single model — a complexity
   classifier maps each request to exactly one tier/model — has no honest ranking of the *other*
-  models to offer, so it returns a one-model plan. To give such a selector resilience, supply a
-  fallback policy to the router's `fallback` constructor parameter. After the plan's models are
-  exhausted, the policy decides the order in which the remaining registered models are tried.
-  Returning them unchanged (`(_, remaining) => remaining`) uses registration order; return them in
-  any order you like (for example, cheapest-first) to control the tail. When `fallback` is `null`,
-  the router only attempts the plan's models.
+  models to offer, so it returns a one-model plan. To give such a selector resilience, supply an
+  `onFailure` delegate to the router. It is invoked on **each** pre-commit failure with a
+  `RouteFailureContext` — the failed `Route`, the (unclassified) `Exception`, the 1-based
+  `AttemptNumber`, and `Remaining`, the still-untried candidates the router can reach (the plan's
+  tail plus the registered routes the plan omitted). It returns the routes to try next, in order:
+  return `Remaining` unchanged to try them all in registration order, return a subset to prune (for
+  example, drop every route sharing the failed provider on a 401), reorder to control the tail (for
+  example, cheapest-first), or return `null`/an empty list to stop and rethrow. Returned routes are
+  de-duped against those already attempted, so routing always terminates. When `onFailure` is
+  `null`, the router only attempts the plan's models.
 
 The exception of the **last** attempted model propagates. The model that ultimately succeeds is
 the one stamped on the response.
@@ -383,14 +409,14 @@ the one stamped on the response.
 ```csharp
 RoutingChatClient client = new RoutingChatClient(
 [
-    new RoutingChatModel("fast", client: fastClient),
-    new RoutingChatModel("smart", client: smartClient),
+    new ChatRoute("fast", client: fastClient),
+    new ChatRoute("smart", client: smartClient),
 ],
     selector: new ComplexityChatRouteSelector(tierMap), // picks one model
-    fallback: (_, remaining) => remaining);             // router tries the rest in registration order
+    onFailure: ctx => ctx.Remaining);                   // router tries the rest in registration order
 ```
 
-**Streaming caveat:** fallback applies only *before the first update is yielded*. Once a
+**Streaming caveat:** `onFailure` applies only *before the first update is yielded*. Once a
 streaming response has started, no fallback occurs.
 
 ## Decision output
@@ -398,7 +424,7 @@ streaming response has started, no fallback occurs.
 The chosen model is recorded on the **response**, not mutated into the forwarded request:
 
 - `ChatResponse.AdditionalProperties` / first streaming update's `AdditionalProperties`:
-  - `RoutingChatClient.SelectedModelNameKey` (`"routing.selected_model"`)
+  - `RoutingChatClient.SelectedRouteNameKey` (`"routing.selected_route"`)
   - `RoutingChatClient.SelectedModelIdKey` (`"routing.selected_model_id"`)
   - `RoutingChatClient.SelectedProviderNameKey` (`"routing.selected_provider"`)
 - An `Activity.Current` tag with the same keys.
@@ -418,14 +444,15 @@ so an unsampled request pays nothing. Read them back with any OpenTelemetry expo
 
 - **`RoutingChatClient.DecisionEventName` (`"routing.decision"`)** — one per request, describing the
   decision the selector made:
-  - `routing.selected_model` — the chosen model's `Name`.
+  - `routing.selected_route` — the chosen route's `Name` (a router-local alias). For cost/usage
+    attribution use `routing.selected_model_id` instead — the route name need not be a billable model.
   - any **decision-rationale** a selector stamped onto `ChatRoutePlan.DecisionMetadata`. The shipped
     selectors emit `routing.complexity.tier` (the classified tier, as a string) and
     `routing.semantic.score` (the winning model's aggregated cosine similarity, as a double).
 
 - **`RoutingChatClient.AttemptEventName` (`"routing.attempt"`)** — one per model the router actually
   tries, in attempt order, capturing the fallback timeline: tags `routing.attempt.ordinal`,
-  `routing.attempt.model`, `routing.attempt.model_id`, `routing.attempt.outcome`
+  `routing.attempt.route`, `routing.attempt.model_id`, `routing.attempt.outcome`
   (`success` / `fallback` / `error`), `routing.attempt.duration_ms`, and (on failure)
   `routing.attempt.error_type`.
 

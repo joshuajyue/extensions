@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\Libraries\Microsoft.Extensions.AI.Abstractions\Microsoft.Extensions.AI.Abstractions.csproj" />
+    <ProjectReference Include="..\..\..\src\Libraries\Microsoft.Extensions.AI\Microsoft.Extensions.AI.csproj" />
     <ProjectReference Include="..\..\..\src\Libraries\Microsoft.Extensions.AI.Routing\Microsoft.Extensions.AI.Routing.csproj" ProjectUnderTest="true" />
   </ItemGroup>
 </Project>
