@@ -145,10 +145,10 @@ Both front doors compose with the standard `AddChatClient` / `ChatClientBuilder`
 routing-specific registration helper is required:
 
 ```csharp
-services.AddChatClient(serviceProvider => new RoutingChatClient(
+services.AddChatClient(sp => new RoutingChatClient(
 [
-    new ChatRoute("openai:gpt-5.3", client: serviceProvider.GetRequiredKeyedService<IChatClient>("gpt-5.3")),
-    new ChatRoute("openai:gpt-4o-mini", client: serviceProvider.GetRequiredKeyedService<IChatClient>("gpt-4o-mini")),
+    new ChatRoute("openai:gpt-5.3", client: sp.GetRequiredKeyedService<IChatClient>("gpt-5.3")),
+    new ChatRoute("openai:gpt-4o-mini", client: sp.GetRequiredKeyedService<IChatClient>("gpt-4o-mini")),
 ]))
     .UseFunctionInvocation()
     .UseOpenTelemetry();
