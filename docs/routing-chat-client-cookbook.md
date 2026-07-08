@@ -648,6 +648,23 @@ Profiles are embedded once and cached. Because the semantic selector produces a 
 need `onFailure` with it. Tune `TopK`, `Aggregation`, and `ScoreThreshold` (global or per-route) via
 `SemanticRouterOptions`. See [`semantic-chat-client-selection.md`](./semantic-chat-client-selection.md).
 
+The selector is **front-door agnostic** — it only picks a route by name — so the *same* instance drives
+`UseRouting()` when your routes are models on one client. Keep the profile keys equal to the route
+names and give each route a `modelId`:
+
+```csharp
+IChatClient openai = CreateOpenAIClient();
+
+ChatRoute[] routes =
+[
+    new ChatRoute("code", modelId: "gpt-4o"),      // profile key "code" → this route
+    new ChatRoute("chat", modelId: "gpt-4o-mini"), // profile key "chat"
+    new ChatRoute("math", modelId: "o3"),          // profile key "math"
+];
+
+IChatClient client = openai.AsBuilder().UseRouting(routes, selector).Build();
+```
+
 ### 5b. Complexity selector (rule-based, zero-latency)
 
 Deterministic keyword/pattern scoring classifies each request into a `ChatComplexityTier`
@@ -673,6 +690,26 @@ A tier classifier picks exactly one route, so its plan is a single route — pai
 (§3) for resilience. Every weight, threshold, and keyword list is on `ComplexityRouterOptions`;
 swapping `TechnicalTerms` for your domain vocabulary makes it domain-aware for free. `ClassifyTier`
 is public if you want the tier without routing.
+
+The tier map's values are route **names**, so this selector drops straight into `UseRouting()` over one
+client — name each route for its model and set a matching `modelId` (the `onFailure` tail still gives
+the single-route plan resilience):
+
+```csharp
+IChatClient openai = CreateOpenAIClient();
+
+ChatRoute[] routes =
+[
+    new ChatRoute("gpt-4o-mini", modelId: "gpt-4o-mini"),
+    new ChatRoute("gpt-4o",      modelId: "gpt-4o"),
+    new ChatRoute("o3",          modelId: "o3"),
+];
+
+IChatClient client = openai
+    .AsBuilder()
+    .UseRouting(routes, selector, onFailure: ctx => ctx.Remaining)
+    .Build();
+```
 
 ### 5c. Making it sticky (pin a conversation to a route)
 
