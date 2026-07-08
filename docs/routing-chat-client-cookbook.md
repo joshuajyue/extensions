@@ -593,12 +593,22 @@ Here's a complete loader for LiteLLM's
 pricing. It carries the `supports_*` flags through as plain string tokens (so a `canRoute` recipe or a
 selector can read them — see §4c) and converts per-token cost to per-million.
 
+The full file lists ~3000 models across every provider LiteLLM knows about, which is far more than any
+one app routes between. This loader keeps only the entries whose key starts with `gpt` (OpenAI) or
+`anthropic.claude` (Anthropic) — ~130 models instead of thousands. Widen or swap the prefixes to match
+the providers you actually use.
+
 ```csharp
+using System.Linq;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 
 static ChatRouteCatalog LoadLiteLlmCatalog(string json, Uri? source = null)
 {
+    // Pull only OpenAI ("gpt*") and Anthropic ("anthropic.claude*") models — the full file lists
+    // thousands of models across every provider, far more than one app routes between.
+    string[] prefixes = ["gpt", "anthropic.claude"];
+
     using JsonDocument doc = JsonDocument.Parse(json);
     var entries = new List<ChatRoute>();
 
@@ -606,6 +616,12 @@ static ChatRouteCatalog LoadLiteLlmCatalog(string json, Uri? source = null)
     {
         // The file ships a documentation-only "sample_spec" pseudo-entry — skip it.
         if (model.Name == "sample_spec" || model.Value.ValueKind != JsonValueKind.Object)
+        {
+            continue;
+        }
+
+        // Keep only the providers we care about.
+        if (!prefixes.Any(p => model.Name.StartsWith(p, StringComparison.Ordinal)))
         {
             continue;
         }
@@ -675,7 +691,7 @@ var router = new RoutingChatClient(
 [
     catalog.Get("gpt-4o-mini").WithClient(openai),  // metadata from catalog, client bound here
     catalog.Get("gpt-4o").WithClient(openai),
-    catalog.CreateRoute("claude-3-5-sonnet-20241022", anthropic), // shorthand for Get(name).WithClient(client)
+    catalog.CreateRoute("anthropic.claude-3-5-sonnet-20241022-v2:0", anthropic), // shorthand for Get(name).WithClient(client)
 ],
     selector: new CheapestRouteSelector());
 ```
@@ -701,7 +717,7 @@ IChatClient router = openai.AsBuilder()
         [
             catalog.Get("gpt-4o-mini"),   // no WithClient — metadata only
             catalog.Get("gpt-4o"),
-            catalog.Get("o4-mini"),
+            catalog.Get("gpt-4.1-mini"),
         ],
         selector: new CheapestRouteSelector())   // sees the same cost/context metadata
     .Build();
