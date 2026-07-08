@@ -240,6 +240,13 @@ var hard  = await client.GetResponseAsync("Think step by step and prove the four
 > when the caller did **not** already pin them. An explicit `ChatOptions.Reasoning.Effort` from the
 > caller always wins. Providers that don't support reasoning effort simply ignore it.
 
+> **`ReasoningEffort` isn't exclusive to `UseRouting()`.** Both front doors share the same engine and
+> the same `ChatRoute.ReasoningEffort` forwarding, so `RoutingChatClient` (§1a) applies a route's
+> reasoning effort too — each bound client gets the chosen route's `ModelId` **and** `ReasoningEffort`.
+> You could, for example, give one cross-provider route a fixed high effort and another a low effort.
+> The mono-model shape above is simply the most *archetypal* place to vary reasoning levels, because
+> there the effort is the **only** thing that changes between routes.
+
 ### Registering in DI
 
 Both front doors compose with the standard `AddChatClient` / `ChatClientBuilder` infrastructure — no
