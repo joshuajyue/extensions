@@ -402,37 +402,32 @@ onFailure: ctx =>
 
 ## 4. The `canRoute` candidate filter
 
-`onFailure` (§3) decides what to do *after* a dispatch fails. `canRoute` decides which routes are
-even **eligible** in the first place. It is an optional predicate accepted by both front doors:
+`canRoute` is an optional predicate that decides, per request, which routes are eligible. Where
+`onFailure` (§3) reacts *after* a dispatch fails, `canRoute` runs *first*, producing the candidate set
+before the selector ever sees it:
 
 ```csharp
 Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? canRoute
 ```
 
-Given a route and the request (its `Messages` and `Options`), it returns whether the router may
-consider that route this turn. When `canRoute` is `null` — the default — **every registered route is
-a candidate**; the router ships no filtering vocabulary of its own.
+**In:** a route plus the request's `Messages` and `Options`. **Out:** `true` to keep the route as a
+candidate this turn, `false` to drop it. `null` — the default — keeps **every** registered route.
 
-**One predicate, both consumers.** The candidate set `canRoute` produces feeds *both* the selector
-(`ChatRouteContext.Routes`, §2) **and** the fallback walk (`RouteFailureContext.Remaining`, §3). A rule
-written once therefore holds everywhere: a route `canRoute` rejects is invisible to the selector *and*
-never resurfaces as a fallback. A selector-only decorator can't achieve this — the fallback walk would
-bypass it — which is why the filter lives on the engine, not inside a selector.
+Its output is the *single* candidate set the rest of the pipeline draws from — both the selector
+(`ChatRouteContext.Routes`, §2) and the fallback walk (`RouteFailureContext.Remaining`, §3). A route
+`canRoute` drops is therefore invisible to the selector *and* never resurfaces as a fallback: one rule,
+enforced in both places.
 
-**The filter is soft.** If the predicate admits **no** route for a request, the router falls through to
-the full candidate set rather than stranding the request. So `canRoute` narrows *preference*; it does
-**not** *guarantee* exclusion. When a request must never reach a given route, put that hard guarantee in
-the selector or `onFailure`.
+The filter is **soft**. If it admits no route for a request, the router falls through to the full
+candidate set rather than stranding the request — so `canRoute` narrows *preference*, not a *guarantee*.
+For a hard "never route here", enforce it in the selector or `onFailure`.
 
-`canRoute` is deliberately unopinionated — one seam for two independent, app-defined concerns:
+Two recipes cover almost every use:
 
-- **Availability** — route *health*: cool a rate-limited route (§4a) or open a circuit after a streak of
-  failures (§4b). Paired with an `onFailure` that records the fault, `canRoute` reads that state to hide
-  an unhealthy route.
-- **Capability** — request *correctness*: route image requests only to vision models, tool requests only
-  to function-calling models (§4c), over whatever metadata your routes declare.
-
-Neither is a library concept — you own the vocabulary and the rules.
+- **Availability** (§4a, §4b) — drop an *unhealthy* route: one cooling after a rate-limit, or with an
+  open circuit. Pair it with an `onFailure` that records the fault; `canRoute` reads that state back.
+- **Capability** (§4c) — drop a route that *can't serve the request*: no vision model for an image, no
+  tool support for a tool call — over whatever metadata your routes declare.
 
 ### 4a. Availability: cool a route on rate-limit / overload (429 / 503 + `Retry-After`)
 
