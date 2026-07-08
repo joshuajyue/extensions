@@ -257,6 +257,101 @@ public class DelegatingRoutingChatClientTests
         Assert.Equal("fallback", response.AdditionalProperties?[RoutingChatClient.SelectedRouteNameKey]);
     }
 
+    [Fact]
+    public void GetService_NullServiceType_Throws()
+    {
+        using var inner = new TestChatClient();
+        using var client = new DelegatingRoutingChatClient(inner, [new ChatRoute("m1")]);
+
+        Assert.Throws<ArgumentNullException>(() => client.GetService(null!));
+    }
+
+    [Fact]
+    public async Task CanRoute_NarrowsCandidates_ForSingleClient()
+    {
+        // The candidate filter behaves identically on the single-client front door: only admitted routes reach the
+        // selector, and the surviving route's model id is shaped onto the request forwarded to the inner client.
+        ChatOptions? forwarded = null;
+        using var inner = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, o, _) =>
+            {
+                forwarded = o;
+                return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok")));
+            }
+        };
+
+        using var client = new DelegatingRoutingChatClient(
+            inner,
+            [new ChatRoute("cheap", modelId: "cheap-model"), new ChatRoute("premium", modelId: "premium-model")],
+            canRoute: (route, _, _) => route.Name == "premium");
+
+        ChatResponse response = await client.GetResponseAsync(_messages);
+
+        Assert.Equal("premium", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
+        Assert.Equal("premium-model", forwarded!.ModelId);
+    }
+
+    [Fact]
+    public async Task OnFailure_FallsBackToPlanOmittedRoute()
+    {
+        // The default selector picks a single route; supplying onFailure lets the middleware reach a plan-omitted
+        // candidate on failure, exactly as RoutingChatClient does, because both drive the same engine.
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var inner = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, o, _) =>
+                o?.ModelId == "primary-model"
+                    ? throw new InvalidOperationException("boom")
+                    : Task.FromResult(good),
+        };
+
+        using var client = new DelegatingRoutingChatClient(
+            inner,
+            [new ChatRoute("primary", modelId: "primary-model"), new ChatRoute("fallback", modelId: "fallback-model")],
+            onFailure: ctx => ctx.Remaining);
+
+        ChatResponse response = await client.GetResponseAsync(_messages);
+
+        Assert.Same(good, response);
+        Assert.Equal("fallback", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
+    }
+
+    [Fact]
+    public async Task Streaming_FallsBackBeforeFirstUpdate()
+    {
+        using var inner = new TestChatClient
+        {
+            GetStreamingResponseAsyncCallback = (_, o, _) =>
+                o?.ModelId == "primary-model" ? ThrowingStream() : YieldUpdates("ok"),
+        };
+
+        using var client = new DelegatingRoutingChatClient(
+            inner,
+            [new ChatRoute("primary", modelId: "primary-model"), new ChatRoute("fallback", modelId: "fallback-model")],
+            PickAll());
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync(_messages))
+        {
+            updates.Add(update);
+        }
+
+        Assert.Single(updates);
+        Assert.Equal("fallback", updates[0].AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
+    }
+
+    private static async IAsyncEnumerable<ChatResponseUpdate> ThrowingStream()
+    {
+        await Task.Yield();
+        foreach (int _ in Array.Empty<int>())
+        {
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "never");
+        }
+
+        throw new InvalidOperationException("boom");
+    }
+
     private static async IAsyncEnumerable<ChatResponseUpdate> YieldUpdates(params string[] texts)
     {
         foreach (string text in texts)

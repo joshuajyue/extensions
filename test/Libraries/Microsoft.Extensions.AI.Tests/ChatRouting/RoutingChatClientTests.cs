@@ -399,7 +399,7 @@ public class RoutingChatClientTests
         using var failing1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("a") };
         using var failing2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("b") };
 
-        var seen = new List<(int Attempt, bool HasRemaining)>();
+        var seen = new List<(int attempt, bool hasRemaining)>();
         IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Routes));
 
         using var client = new RoutingChatClient(
@@ -983,6 +983,316 @@ public class RoutingChatClientTests
         Assert.Equal(1, SpanAttemptOrdinal(innerSpan));
         Assert.Equal(1, SpanAttemptOrdinal(outerSpan));
     }
+
+    [Fact]
+    public async Task DefaultSelector_ExplicitModelId_NoMatch_FallsBackToFirstRoute()
+    {
+        // The default selector honors ChatOptions.ModelId when it names a route, but a value matching neither a
+        // route's ModelId nor its Name must not strand the request — it falls through to the first registered route.
+        var r1 = new ChatResponse(new ChatMessage(ChatRole.Assistant, "one"));
+        using var c1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r1) };
+        bool secondCalled = false;
+        using var c2 = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, _, _) => { secondCalled = true; return Task.FromResult(new ChatResponse()); },
+        };
+
+        using var client = new RoutingChatClient(
+            [new ChatRoute("m1", modelId: "gpt-a", client: c1), new ChatRoute("m2", modelId: "gpt-b", client: c2)]);
+
+        ChatResponse response = await client.GetResponseAsync(
+            [new(ChatRole.User, "hi")], new ChatOptions { ModelId = "does-not-exist" });
+
+        Assert.Same(r1, response);
+        Assert.Equal("m1", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
+        Assert.False(secondCalled);
+    }
+
+    [Fact]
+    public async Task Cancellation_DuringDispatch_IsNotTreatedAsFailure_AndBypassesOnFailure()
+    {
+        // A cancellation is the caller's decision, never a route failure: when a dispatch throws while the token is
+        // already canceled, the router must rethrow without consulting onFailure and without trying any other route.
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        bool onFailureCalled = false;
+        bool secondCalled = false;
+        using var failing = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, _, ct) => throw new OperationCanceledException(ct),
+        };
+        using var second = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, _, _) => { secondCalled = true; return Task.FromResult(new ChatResponse()); },
+        };
+
+        // The selector plans BOTH routes so a fallback would otherwise be available — the cancellation, not an empty
+        // plan, is what stops the router.
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Routes));
+        using var client = new RoutingChatClient(
+            [new ChatRoute("primary", client: failing), new ChatRoute("second", client: second)],
+            selector,
+            onFailure: _ => { onFailureCalled = true; return null; });
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => client.GetResponseAsync([new(ChatRole.User, "hi")], cancellationToken: cts.Token));
+
+        Assert.False(onFailureCalled);
+        Assert.False(secondCalled);
+    }
+
+    [Fact]
+    public async Task OnFailure_ReturningListWithNullEntry_SkipsNull_AndTriesValidRoute()
+    {
+        // A failure delegate may hand back a list that contains a null entry, for example from a sloppy LINQ
+        // projection; the router drops nulls while keeping the real routes, so routing still makes progress.
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("boom") };
+        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Routes[0]));
+
+        using var client = new RoutingChatClient(
+            [new ChatRoute("primary", client: failing), new ChatRoute("fallback", client: working)],
+            selector,
+            onFailure: ctx => new List<ChatRoute> { null!, ctx.Remaining[0] });
+
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Same(good, response);
+        Assert.Equal("fallback", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
+    }
+
+    [Fact]
+    public async Task DispatchReturningNullResponse_DoesNotThrow_AndReturnsNull()
+    {
+        // A degenerate client may return a null response; the router's stamping must guard against it rather than
+        // NullReferenceException, propagating the null verbatim.
+        using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult<ChatResponse>(null!) };
+        using var client = new RoutingChatClient([new ChatRoute("only", modelId: "x", client: inner)]);
+
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public async Task Streaming_WithRoutingSourceSubscribed_KeepsRouterSpanCurrentAcrossYields()
+    {
+        // When a listener subscribes to the routing source the router opens a real span, and it must remain
+        // Activity.Current across each yield (the async-iterator state machine can otherwise drop it), so a nested
+        // router's span parents correctly. Draining several updates exercises the restore path.
+        using var inner = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("a", "b", "c") };
+        using var client = new RoutingChatClient([new ChatRoute("m1", modelId: "x", client: inner)]);
+
+        using var capture = new RoutingSpanCapture();
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync([new(ChatRole.User, "hi")]))
+        {
+            updates.Add(update);
+        }
+
+        Assert.Equal(3, updates.Count);
+        Activity span = Assert.Single(capture.Spans);
+        Assert.Equal("m1", SpanSelectedModel(span));
+    }
+
+    [Fact]
+    public void GetService_WithNonNullServiceKey_ReturnsNull()
+    {
+        // The router exposes no keyed services: any request carrying a service key resolves to null, including for
+        // types it would otherwise return (its own metadata or itself).
+        using var inner = new TestChatClient();
+        using var client = new RoutingChatClient([new ChatRoute("m1", client: inner)]);
+
+        Assert.Null(client.GetService(typeof(IChatClient), serviceKey: "key"));
+        Assert.Null(client.GetService(typeof(ChatClientMetadata), serviceKey: "key"));
+    }
+
+    [Fact]
+    public void GetService_NullServiceType_Throws()
+    {
+        using var inner = new TestChatClient();
+        using var client = new RoutingChatClient([new ChatRoute("m1", client: inner)]);
+
+        Assert.Throws<ArgumentNullException>(() => client.GetService(null!));
+    }
+
+    [Fact]
+    public async Task OnFailure_ExposesRequestMessagesAndOptions()
+    {
+        // The failure delegate receives the live request context — the same messages and options the caller passed —
+        // so a stateful policy can inspect them (for example to prune by tenant or modality).
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("boom") };
+        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+
+        var messages = new List<ChatMessage> { new(ChatRole.User, "hi") };
+        var options = new ChatOptions();
+
+        ChatOptions? seenOptions = null;
+        IEnumerable<ChatMessage>? seenMessages = null;
+
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Routes));
+        using var client = new RoutingChatClient(
+            [new ChatRoute("primary", client: failing), new ChatRoute("fallback", client: working)],
+            selector,
+            onFailure: ctx =>
+            {
+                seenOptions = ctx.Options;
+                seenMessages = ctx.Messages;
+                return ctx.Remaining;
+            });
+
+        _ = await client.GetResponseAsync(messages, options);
+
+        Assert.Same(options, seenOptions);
+        Assert.Same(messages, seenMessages);
+    }
+
+    [Fact]
+    public void Constructor_RejectsNullRoutesCollection()
+    {
+        Assert.Throws<ArgumentNullException>(() => new RoutingChatClient(null!));
+    }
+
+    [Fact]
+    public void Constructor_RejectsNullRouteInList()
+    {
+        Assert.Throws<ArgumentNullException>(() => new RoutingChatClient([null!]));
+    }
+
+    [Fact]
+    public async Task Fallback_WalksMultiplePlanLevels_BeforeSucceeding()
+    {
+        // Two consecutive routes fail before the third succeeds: fallback is not limited to a single hop, and the
+        // route that ultimately answers is the one stamped on the response.
+        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        using var f1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("1") };
+        using var f2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("2") };
+        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Routes));
+        using var client = new RoutingChatClient(
+            [new ChatRoute("a", client: f1), new ChatRoute("b", client: f2), new ChatRoute("c", client: working)],
+            selector);
+
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Same(good, response);
+        Assert.Equal("c", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
+    }
+
+    [Fact]
+    public async Task Selector_SeesOnlyCandidatesAdmittedByCanRoute_AndTheRequestOptions()
+    {
+        // The candidate filter is applied before the selector runs, so ctx.Routes is already narrowed; the request
+        // options flow through unchanged for the selector to read.
+        using var a = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
+        using var b = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
+
+        IReadOnlyList<ChatRoute>? seenRoutes = null;
+        ChatOptions? seenOptions = null;
+        var options = new ChatOptions();
+
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx =>
+        {
+            seenRoutes = ctx.Routes;
+            seenOptions = ctx.Options;
+            return new ChatRoutePlan(ctx.Routes[0]);
+        });
+
+        using var client = new RoutingChatClient(
+            [new ChatRoute("a", client: a), new ChatRoute("b", client: b)],
+            selector,
+            canRoute: (route, _, _) => route.Name == "b");
+
+        _ = await client.GetResponseAsync([new(ChatRole.User, "hi")], options);
+
+        Assert.NotNull(seenRoutes);
+        ChatRoute only = Assert.Single(seenRoutes!);
+        Assert.Equal("b", only.Name);
+        Assert.Same(options, seenOptions);
+    }
+
+    [Fact]
+    public async Task RouteForwarding_ShapesModelIdAndReasoningEffort_WhenCallerPinsNeither()
+    {
+        // A route may advise both a model id and a reasoning effort; when the caller pinned neither, both are applied
+        // on a clone, leaving the caller's options untouched.
+        ChatOptions? forwarded = null;
+        var options = new ChatOptions();
+        using var inner = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, o, _) => { forwarded = o; return Task.FromResult(new ChatResponse()); },
+        };
+
+        using var client = new RoutingChatClient(
+            [new ChatRoute("m1", modelId: "gpt-x", reasoningEffort: ReasoningEffort.High, client: inner)]);
+
+        _ = await client.GetResponseAsync([new(ChatRole.User, "hi")], options);
+
+        Assert.NotNull(forwarded);
+        Assert.NotSame(options, forwarded);
+        Assert.Equal("gpt-x", forwarded!.ModelId);
+        Assert.Equal(ReasoningEffort.High, forwarded.Reasoning!.Effort);
+        Assert.Null(options.Reasoning);
+    }
+
+    [Fact]
+    public async Task RouteForwarding_NullOptions_WithRouteModelId_CreatesOptions()
+    {
+        // With no caller options at all, a route that advises a model id still gets it forwarded on a fresh options
+        // instance.
+        ChatOptions? forwarded = null;
+        using var inner = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, o, _) => { forwarded = o; return Task.FromResult(new ChatResponse()); },
+        };
+
+        using var client = new RoutingChatClient([new ChatRoute("m1", modelId: "gpt-x", client: inner)]);
+
+        _ = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.NotNull(forwarded);
+        Assert.Equal("gpt-x", forwarded!.ModelId);
+    }
+
+    [Fact]
+    public async Task Messages_NonListEnumerable_IsMaterializedOnce_AndSharedByEveryStage()
+    {
+        // A lazily-generated message sequence must be enumerated exactly once and the same snapshot handed to both
+        // the selector and the dispatched client, so a generator with side effects is never re-run per stage.
+        int enumerations = 0;
+        IEnumerable<ChatMessage> Lazy()
+        {
+            enumerations++;
+            yield return new ChatMessage(ChatRole.User, "hi");
+        }
+
+        IEnumerable<ChatMessage>? selectorSaw = null;
+        IEnumerable<ChatMessage>? dispatchSaw = null;
+
+        using var inner = new TestChatClient
+        {
+            GetResponseAsyncCallback = (m, _, _) => { dispatchSaw = m; return Task.FromResult(new ChatResponse()); },
+        };
+        IChatRouteSelector selector = ChatRouteSelector.Create(ctx =>
+        {
+            selectorSaw = ctx.Messages;
+            return new ChatRoutePlan(ctx.Routes[0]);
+        });
+
+        using var client = new RoutingChatClient([new ChatRoute("m1", client: inner)], selector);
+
+        _ = await client.GetResponseAsync(Lazy());
+
+        Assert.Equal(1, enumerations);
+        Assert.Same(selectorSaw, dispatchSaw);
+    }
+
     private static async IAsyncEnumerable<ChatResponseUpdate> YieldUpdates(params string[] texts)
     {
         foreach (string text in texts)
