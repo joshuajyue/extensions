@@ -27,17 +27,16 @@ namespace Microsoft.Extensions.AI;
 /// <see cref="ChatOptions.ModelId"/> when set, otherwise it uses the first registered model.
 /// </para>
 /// <para>
-/// Before a selector runs, the router applies a soft <em>capability gate</em>: it narrows the candidate
-/// routes to those that can satisfy capabilities the request provably needs. The required capabilities are
-/// produced by an injectable <em>capability detector</em>; the default detector requires
-/// <see cref="ChatModelCapabilities.Vision"/> when a message carries image content and
-/// <see cref="ChatModelCapabilities.FunctionCalling"/> when <see cref="ChatOptions.Tools"/> include an
-/// <see cref="AIFunctionDeclaration"/>. A route declares the tokens it supports under
-/// <see cref="ChatModelCapabilities.PropertyKey"/> in its <see cref="ChatRoute.AdditionalProperties"/>, and the
-/// router keeps only routes whose declared set is a superset of the required set. This is a correctness filter
-/// shared by every selector and the fallback chain — not a quality signal. It is soft: when no registered route
-/// declares a required capability, the gate falls through to the full set rather than stranding the request, and
-/// it can be disabled by supplying a <c>capabilityDetector</c> that always returns no tokens.
+/// Before a selector runs, the router applies an optional <em>candidate filter</em>: a caller-supplied
+/// <c>canRoute</c> predicate that, given a route and the request (its messages and options), decides whether
+/// the router may consider that route. It is the single, unopinionated narrowing seam, and it expresses both
+/// correctness (&quot;this message carries an image, so keep only vision-capable routes&quot;) and health
+/// (&quot;this route is cooling after a rate-limit, so skip it&quot;); the router ships no capability vocabulary
+/// or availability model of its own — the predicate encodes whatever rules the application actually has. The
+/// filter is shared by every selector and the fallback chain alike, and it is soft: if the predicate admits no
+/// route (for example every route is momentarily unavailable) it falls through to the full set rather than
+/// stranding the request, so the predicate narrows preference rather than guaranteeing exclusion. When
+/// <c>canRoute</c> is <see langword="null"/>, every registered route is always a candidate.
 /// </para>
 /// <para>
 /// A selector returns a <see cref="ChatRoutePlan"/> of the models it prefers, primary first. The router
@@ -141,7 +140,7 @@ public class RoutingChatClient : IChatClient
             route.Client!.GetStreamingResponseAsync(messages, RouteForwarding.Apply(route, options), cancellationToken);
 
     // The routes this router owns, retained so Dispose can dispose each bound client exactly once. Every routing
-    // decision — the selector call, the capability gate, the fallback walk, and all telemetry — lives in the
+    // decision — the selector call, the candidate filter, the fallback walk, and all telemetry — lives in the
     // engine, which this router drives with the dispatch closures above.
     private readonly ChatRoute[] _routes;
     private readonly RouteDispatchLoop _loop;
@@ -164,24 +163,25 @@ public class RoutingChatClient : IChatClient
     /// applies only before the first update is produced; once a token is on the wire the router never re-routes.
     /// A cancellation is never treated as a route failure and never reaches the delegate.
     /// </param>
-    /// <param name="capabilityDetector">
-    /// An optional capability detector. Given the request messages and options, it returns the capability tokens the
-    /// request provably requires; the router then narrows the candidate routes to those whose declared capabilities
-    /// (under <see cref="ChatModelCapabilities.PropertyKey"/> in <see cref="ChatRoute.AdditionalProperties"/>) are a
-    /// superset. When <see langword="null"/>, a default detector is used that requires
-    /// <see cref="ChatModelCapabilities.Vision"/> for image content and <see cref="ChatModelCapabilities.FunctionCalling"/>
-    /// for <see cref="AIFunctionDeclaration"/> tools. The gate is soft: if no registered route declares a required
-    /// capability, it falls through to the full set rather than stranding the request. Supply a detector that always
-    /// returns no tokens to disable the gate so every registered route is always a candidate.
+    /// <param name="canRoute">
+    /// An optional candidate filter. Given a route and the request (its messages and options), it returns whether
+    /// the router may consider that route; the router narrows the candidate routes — those the selector and the
+    /// fallback chain see — to the routes it admits. Use it for correctness (keep only routes that can serve the
+    /// request's modalities or tools) or health (skip a route that is cooling, has an open circuit, is over budget,
+    /// or is switched off), composing whatever rules apply. The filter is soft: if the predicate admits no route it
+    /// falls through to the full set rather than stranding the request, so it narrows preference rather than
+    /// guaranteeing exclusion — enforce a hard guarantee in the selector or <paramref name="onFailure"/> if a
+    /// request must never reach a given route. When <see langword="null"/>, every registered route is always a
+    /// candidate.
     /// </param>
     public RoutingChatClient(
         IReadOnlyList<ChatRoute> routes,
         IChatRouteSelector? selector = null,
         Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>? onFailure = null,
-        Func<IEnumerable<ChatMessage>, ChatOptions?, IReadOnlyCollection<string>>? capabilityDetector = null)
+        Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? canRoute = null)
     {
         _routes = ValidateRoutes(routes);
-        _loop = new RouteDispatchLoop(_routes, selector, onFailure, capabilityDetector);
+        _loop = new RouteDispatchLoop(_routes, selector, onFailure, canRoute);
     }
 
     /// <inheritdoc/>

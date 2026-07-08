@@ -22,8 +22,8 @@ MIT-licensed; see [`THIRD-PARTY-NOTICES.TXT`](../THIRD-PARTY-NOTICES.TXT).
 ## What it is
 
 `RoutingChatClient` is an `IChatClient` that owns **N** candidate models and forwards each
-request to one of them. It is the routing **mechanism**: it holds the candidates, applies a
-soft capability gate, walks fallbacks on failure, and records the chosen
+request to one of them. It is the routing **mechanism**: it holds the candidates, applies an
+optional candidate filter, walks fallbacks on failure, and records the chosen
 model on the response. It holds **no opinion** about which model is better — that is delegated
 entirely to a swappable selection **policy**, an `IChatRouteSelector`.
 
@@ -61,35 +61,32 @@ Because each candidate is itself an `IChatClient`, a routing pipeline forms a **
   default).
 - A branch may itself be a `RoutingChatClient`, giving a recursive routing tree.
 
-## Capability gate
+## Candidate filter (`canRoute`)
 
-Before any selector runs, the router applies a **soft capability gate**. It asks an injectable
-`capabilityDetector` delegate which capability tokens the request **provably** needs, then narrows
-the candidate routes to those whose declared tokens are a superset. A route declares its supported
-tokens in `ChatRoute.AdditionalProperties` under `ChatModelCapabilities.PropertyKey`
-(`"capabilities"`).
+Before any selector runs, the router narrows its candidate routes through an **optional** `canRoute`
+predicate — `Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>`. Given a route and the
+request (its messages and options), it returns whether the router may consider that route for this
+request. When `canRoute` is `null` (the default) every registered route is a candidate; the router
+ships **no** filtering vocabulary of its own.
 
-When `capabilityDetector` is `null`, the default detector uses only high-confidence signals derived
-from the request itself — never an estimate or a guess:
+One predicate covers both consumers of the candidate set — the selector's `ChatRouteContext.Routes`
+**and** the fallback walk's `RouteFailureContext.Remaining` — so a rule written once holds everywhere,
+with no need to re-implement it inside `onFailure`. It is the single seam for two independent concerns
+applications used to ask for separately:
 
-- a message carrying image content (`DataContent`/`UriContent` with an `image/*` media type)
-  requires `ChatModelCapabilities.Vision` (`"vision"`);
-- a supplied `AIFunctionDeclaration` tool requires `ChatModelCapabilities.FunctionCalling`
-  (`"function_calling"`).
+- **Correctness / capability** — "this request carries an image, so only vision-capable routes qualify."
+  Express it over whatever tokens your routes declare in `AdditionalProperties` (the LiteLLM catalog
+  loader in the cookbook carries `supports_*` flags through as `"capabilities"` tokens for exactly this).
+  The router hard-codes no capability set.
+- **Availability / health** — "this route is cooling after a 429, so skip it." Pair a `RouteCooldownStore`
+  (or your own circuit-breaker state) read here with an `onFailure` that writes to it.
 
-This is a **correctness filter**, not a quality signal: it is shared by every selector *and*
-the fallback chain, so a selector never has to re-implement "can this model even handle the
-request". Fuzzier dimensions (such as "this looks like a reasoning task") are deliberately
-excluded — judging the request is a selector's job.
-
-The gate is **soft** in two ways:
-
-- **Fallthrough:** if no registered route positively declares a required capability (sparse or
-  incorrect capability metadata), the gate returns the full candidate set rather than stranding the
-  request. A route only gets excluded when at least one *other* route declares the capability.
-- **Bypass:** supply `capabilityDetector: static (_, _) => Array.Empty<string>()` so every route is
-  always a candidate. Use this when you don't trust the catalog's capability metadata and want the
-  selector/`ModelId` to have the final say.
+The filter is **soft**: if the predicate admits no route for a request (for example every route is
+momentarily cooling), the router falls through to the full candidate set rather than stranding the
+request — so `canRoute` narrows *preference*, it does not *guarantee* exclusion. When a request must
+never reach a given route, enforce that hard guarantee in the selector or `onFailure`. See the cookbook
+([`routing-chat-client-cookbook.md`](./routing-chat-client-cookbook.md)) §3c/§3d (availability) and §6
+(capability) for complete recipes.
 
 ## Building a router
 
@@ -115,8 +112,7 @@ var catalog = new ChatRouteCatalog(
         modelId: "gpt-5.3",
         additionalProperties: new AdditionalPropertiesDictionary
         {
-            [ChatModelCapabilities.PropertyKey] =
-                new[] { ChatModelCapabilities.Reasoning, ChatModelCapabilities.FunctionCalling },
+            ["capabilities"] = new[] { "reasoning", "function_calling" },
         },
         inputTokenCostPerMillion: 10,
         outputTokenCostPerMillion: 30),
@@ -126,8 +122,7 @@ var catalog = new ChatRouteCatalog(
         modelId: "gpt-4o-mini",
         additionalProperties: new AdditionalPropertiesDictionary
         {
-            [ChatModelCapabilities.PropertyKey] =
-                new[] { ChatModelCapabilities.FunctionCalling, ChatModelCapabilities.Vision },
+            ["capabilities"] = new[] { "function_calling", "vision" },
         },
         inputTokenCostPerMillion: 1,
         outputTokenCostPerMillion: 3,
@@ -174,17 +169,17 @@ services.AddChatClient(sp => new RoutingChatClient(
 
 
 The user-facing noun is **"route"** (`ChatRoute`). A `ChatRoute` carries optional
-**objective** metadata only — stable route name, provider, model id, capability tokens declared
-under `ChatModelCapabilities.PropertyKey`, input/output token cost, a context-window hint
-(`MaxInputTokens`), a latency hint, source URL, and update time. The metadata is advisory: aside
-from the router's capability gate reading the well-known capability token set, only selectors decide
-how to use it.
+**objective** metadata only — stable route name, provider, model id, input/output token cost, a
+context-window hint (`MaxInputTokens`), a latency hint, source URL, and update time, plus an open
+`AdditionalProperties` bag for anything else (for example capability tokens). The metadata is
+advisory: the router reads only route identity for dispatch, while a `canRoute` predicate and the
+selectors decide how to use the rest.
 
 Subjective or custom dimensions (e.g., a quality score, benchmark results, region, or any
 provider-specific signal a selector needs) are **not** first-class fields. Put them in
 `AdditionalProperties` under app-specific keys — the modular extension bag — and have your selector
-read them. Because capability tokens are open strings, applications can add their own objective
-tokens there too without waiting for a library change:
+read them. Capability tokens are just open strings under an app-chosen key, so applications can add
+their own objective tokens there too without waiting for a library change:
 
 ```csharp
 new ChatRoute(
@@ -193,8 +188,7 @@ new ChatRoute(
     modelId: "gpt-5.3",
     additionalProperties: new AdditionalPropertiesDictionary
     {
-        [ChatModelCapabilities.PropertyKey] =
-            new[] { ChatModelCapabilities.Reasoning, ChatModelCapabilities.FunctionCalling, "legal_reviewed" },
+        ["capabilities"] = new[] { "reasoning", "function_calling", "legal_reviewed" },
         ["quality"] = 0.95,
         ["region"] = "us-east",
     });
@@ -374,8 +368,8 @@ routing is just another selector, it composes with the rest of the mechanism: re
 and nesting all apply unchanged. Since a tier classifier picks exactly one model, its
 plan is a **single model** — to get fallback, pair it with the router's `onFailure` delegate (see
 [Fallback](#fallback-circuit-breaking) above), which owns the order in which the other models are
-tried. (Capability gating still applies — the router's soft capability gate runs before the tier
-classifier — but the classifier does not itself apply a context-window filter, so pair it with
+tried. (Any `canRoute` filter still applies — the router narrows candidates before the tier
+classifier runs — but the classifier does not itself apply a context-window filter, so pair it with
 capacity-aware tier mappings if a tier's model has a small context window.)
 
 ## Model metadata and currency

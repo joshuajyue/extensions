@@ -13,9 +13,23 @@ namespace Microsoft.Extensions.AI;
 
 public class RoutingChatClientTests
 {
-    // Builds a route that declares the given capability tokens under ChatModelCapabilities.PropertyKey.
+    // The AdditionalProperties key a test route uses to declare capability tokens that a canRoute recipe reads.
+    private const string CapabilitiesKey = "capabilities";
+
+    // Builds a route that declares the given capability tokens under CapabilitiesKey.
     private static ChatRoute Capable(string name, IChatClient client, params string[] capabilities) =>
-        new(name, additionalProperties: new AdditionalPropertiesDictionary { [ChatModelCapabilities.PropertyKey] = capabilities }, client: client);
+        new(name, additionalProperties: new AdditionalPropertiesDictionary { [CapabilitiesKey] = capabilities }, client: client);
+
+    // Whether a route declares the given capability token under CapabilitiesKey.
+    private static bool Declares(ChatRoute route, string token) =>
+        route.AdditionalProperties is not null &&
+        route.AdditionalProperties.TryGetValue(CapabilitiesKey, out object? value) &&
+        value is IEnumerable<string> tokens &&
+        tokens.Contains(token, StringComparer.OrdinalIgnoreCase);
+
+    // Whether any message carries image content.
+    private static bool HasImage(IEnumerable<ChatMessage> messages) =>
+        messages.Any(m => m.Contents.Any(c => c is DataContent d && d.HasTopLevelMediaType("image")));
 
     [Fact]
     public void Constructor_RejectsEmptyModels()
@@ -340,7 +354,6 @@ public class RoutingChatClientTests
                 new ChatRoute("anthropic-c", providerName: "anthropic", client: anthropic),
             ],
             selector,
-            capabilityDetector: static (_, _) => Array.Empty<string>(),
             onFailure: ctx => ctx.Remaining
                 .Where(r => !string.Equals(r.ProviderName, ctx.Route.ProviderName, StringComparison.Ordinal))
                 .ToList());
@@ -366,7 +379,6 @@ public class RoutingChatClientTests
         using var client = new RoutingChatClient(
             [new ChatRoute("a", client: a), new ChatRoute("b", client: b)],
             selector,
-            capabilityDetector: static (_, _) => Array.Empty<string>(),
             onFailure: ctx =>
             {
                 // Return the full registry every time; the router must still drop tried routes and terminate.
@@ -479,7 +491,6 @@ public class RoutingChatClientTests
         using var outer = new RoutingChatClient(
             [new ChatRoute("inner", client: inner), new ChatRoute("backup", client: backupClient)],
             selector: ChatRouteSelector.Create(ctx => new ChatRoutePlan(ctx.Routes)),
-            capabilityDetector: static (_, _) => Array.Empty<string>(),
             onFailure: ctx =>
             {
                 outerSaw ??= ctx.Exception;
@@ -736,7 +747,7 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task CapabilityGate_NarrowsToVisionModel_WhenRequestContainsImage()
+    public async Task CanRoute_NarrowsToVisionModel_WhenRequestContainsImage()
     {
         bool plainCalled = false;
         bool visionCalled = false;
@@ -749,13 +760,14 @@ public class RoutingChatClientTests
             GetResponseAsyncCallback = (_, _, _) => { visionCalled = true; return Task.FromResult(new ChatResponse()); },
         };
 
-        // The default (empty) selector pins to Routes[0]; the gate must remove the non-vision first model so
-        // the image request routes to the vision-capable one.
+        // A capability recipe expressed as canRoute: when the request carries an image, keep only vision-capable
+        // routes. The default (empty) selector then pins to the sole survivor.
         using var client = new RoutingChatClient(
         [
             new ChatRoute("plain", client: plain),
-            Capable("vision", vision, ChatModelCapabilities.Vision),
-        ]);
+            Capable("vision", vision, "vision"),
+        ],
+        canRoute: (route, messages, _) => !HasImage(messages) || Declares(route, "vision"));
 
         var message = new ChatMessage(ChatRole.User, [new DataContent(new byte[] { 1, 2, 3 }, "image/png")]);
         ChatResponse response = await client.GetResponseAsync([message]);
@@ -766,7 +778,7 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task CapabilityGate_NarrowsToToolCallingModel_WhenToolsRequested()
+    public async Task CanRoute_NarrowsToToolCallingModel_WhenToolsRequested()
     {
         using var plain = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
         using var tools = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
@@ -774,8 +786,9 @@ public class RoutingChatClientTests
         using var client = new RoutingChatClient(
         [
             new ChatRoute("plain", client: plain),
-            Capable("tools", tools, ChatModelCapabilities.FunctionCalling),
-        ]);
+            Capable("tools", tools, "function_calling"),
+        ],
+        canRoute: (route, _, options) => options?.Tools is not { Count: > 0 } || Declares(route, "function_calling"));
 
         var options = new ChatOptions { Tools = [AIFunctionFactory.Create(() => "ok", "get_status")] };
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "status?")], options);
@@ -784,22 +797,23 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task CapabilityGate_FallsThrough_WhenNoModelDeclaresCapability()
+    public async Task CanRoute_FallsThrough_WhenPredicateAdmitsNoRoute()
     {
-        // Soft gate: when no registered model positively declares the required capability (sparse or wrong
-        // trait metadata), the router must not strand the request — it falls back to the full candidate set.
+        // Soft filter: when the predicate excludes every route (for example every route is momentarily
+        // unavailable), the router must not strand the request — it falls back to the full candidate set.
         using var only = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
 
-        using var client = new RoutingChatClient([new ChatRoute("only", client: only)]);
+        using var client = new RoutingChatClient(
+            [new ChatRoute("only", client: only)],
+            canRoute: static (_, _, _) => false);
 
-        var message = new ChatMessage(ChatRole.User, [new DataContent(new byte[] { 1, 2, 3 }, "image/png")]);
-        ChatResponse response = await client.GetResponseAsync([message]);
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
 
         Assert.Equal("only", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
     }
 
     [Fact]
-    public async Task CapabilityGate_Disabled_RoutesToNonCapableModel()
+    public async Task CanRoute_Null_AppliesNoFilter()
     {
         bool plainCalled = false;
         using var plain = new TestChatClient
@@ -808,13 +822,13 @@ public class RoutingChatClientTests
         };
         using var vision = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
 
-        // Bypass the gate: the default selector pins to Routes[0] even though it lacks Vision.
+        // With no candidate filter, every route is a candidate: the default selector pins Routes[0] even for an
+        // image request.
         using var client = new RoutingChatClient(
-            [
-                new ChatRoute("plain", client: plain),
-                Capable("vision", vision, ChatModelCapabilities.Vision),
-            ],
-            capabilityDetector: static (_, _) => Array.Empty<string>());
+        [
+            new ChatRoute("plain", client: plain),
+            Capable("vision", vision, "vision"),
+        ]);
 
         var message = new ChatMessage(ChatRole.User, [new DataContent(new byte[] { 1, 2, 3 }, "image/png")]);
         ChatResponse response = await client.GetResponseAsync([message]);
@@ -907,8 +921,7 @@ public class RoutingChatClientTests
         using var inner = new RoutingChatClient(
             [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
         using var outer = new RoutingChatClient(
-            [new ChatRoute("Complexity", client: inner)],
-            capabilityDetector: static (_, _) => Array.Empty<string>());
+            [new ChatRoute("Complexity", client: inner)]);
 
         ChatResponse response = await outer.GetResponseAsync([new(ChatRole.User, "hi")]);
 
@@ -929,8 +942,7 @@ public class RoutingChatClientTests
         using var inner = new RoutingChatClient(
             [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
         using var outer = new RoutingChatClient(
-            [new ChatRoute("Complexity", client: inner)],
-            capabilityDetector: static (_, _) => Array.Empty<string>());
+            [new ChatRoute("Complexity", client: inner)]);
 
         ChatResponseUpdate? first = null;
         await foreach (ChatResponseUpdate update in outer.GetStreamingResponseAsync([new(ChatRole.User, "hi")]))
@@ -957,8 +969,7 @@ public class RoutingChatClientTests
         using var inner = new RoutingChatClient(
             [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
         using var outer = new RoutingChatClient(
-            [new ChatRoute("Complexity", client: inner)],
-            capabilityDetector: static (_, _) => Array.Empty<string>());
+            [new ChatRoute("Complexity", client: inner)]);
 
         using var capture = new RoutingSpanCapture();
         _ = await outer.GetResponseAsync([new(ChatRole.User, "hi")]);

@@ -52,7 +52,7 @@ The folder divides cleanly into three groups:
 
 | Group | Files |
 |---|---|
-| **Mechanism** | `RoutingChatClient`, `ChatRoute`, `ChatRouteCatalog`, `ChatModelCapabilities` |
+| **Mechanism** | `RoutingChatClient`, `ChatRoute`, `ChatRouteCatalog` |
 | **Policy contract** | `IChatRouteSelector`, `ChatRouteSelector`, `ChatRouteContext`, `ChatRoutePlan` |
 | **Shipped policies** | `SemanticChatRouteSelector` (+ `SemanticRouterOptions`, `SemanticRouteAggregation`), `ComplexityChatRouteSelector` (+ `ComplexityRouterOptions`, `ChatComplexityTier`) |
 
@@ -163,9 +163,8 @@ Fallback is split across the same mechanism/policy line as selection:
 ## The mechanism
 
 *Part of the core `Microsoft.Extensions.AI` package (`RoutingChatClient`).
-The model-metadata types that follow — `ChatRoute`, `ChatRouteCatalog`,
-`ChatModelCapabilities` — are the router's input vocabulary and therefore live alongside the policy
-seam in `Microsoft.Extensions.AI.Abstractions`.*
+The model-metadata types that follow — `ChatRoute`, `ChatRouteCatalog` — are the router's input
+vocabulary and therefore live alongside the policy seam in `Microsoft.Extensions.AI.Abstractions`.*
 
 ### `RoutingChatClient.cs` — the orchestrator
 
@@ -173,16 +172,15 @@ The heart of the feature, and an `IChatClient` itself. Responsibilities, in orde
 
 1. **Normalize** the messages into a re-enumerable list (`NormalizeMessages`) so the selector and the
    invocation see the same sequence without double-enumerating a lazy source.
-2. **Apply the capability gate** (`GetCandidateRoutes`) — ask the `capabilityDetector` delegate which
-   open string tokens the request *provably* needs, then narrow the registered routes to those whose
-   declared tokens (under `ChatModelCapabilities.PropertyKey` in `AdditionalProperties`) are a
-   superset. The default detector emits `ChatModelCapabilities.Vision` for image content and
-   `ChatModelCapabilities.FunctionCalling` for `AIFunctionDeclaration` tools. The gate is **soft**:
-   if no route declares a required capability it returns the full set rather than stranding the
-   request, and a detector that always returns no tokens disables it entirely. The resulting candidate
-   set feeds both the `ChatRouteContext` the selector sees and the `onFailure` lookahead
-   (`RouteFailureContext.Remaining`). Only high-confidence,
-   request-derived signals are used — fuzzy dimensions (e.g. "reasoning") are left to the selector.
+2. **Apply the candidate filter** (`GetCandidateRoutes`) — when an optional `canRoute` predicate was
+   supplied, keep only the registered routes it admits for this request `(route, messages, options)`;
+   when it is `null`, every route is a candidate. The router ships no filtering vocabulary of its own —
+   `canRoute` expresses both correctness ("this request has an image, so require a vision-capable
+   route") and health ("this route is cooling, skip it") as application recipes over route metadata.
+   The filter is **soft**: if the predicate admits no route it returns the full set rather than
+   stranding the request. The resulting candidate set feeds both the `ChatRouteContext` the selector
+   sees and the `onFailure` lookahead (`RouteFailureContext.Remaining`), so a rule written once holds
+   for selection and fallback alike.
 3. **Run the selector** (`RunSelectorAsync`) for every request — or, when no selector was supplied, the
    opinion-free `DefaultSelectRoute`: honor `ChatOptions.ModelId` (matched case-insensitively against
    each model's `ModelId` or `Name`), otherwise the first registered model. The router holds no
@@ -241,9 +239,9 @@ infrastructure like any other `IChatClient`. The constructor takes:
   with `ChatRouteSelector.Create` to pass a lambda here.
 - `onFailure` — the optional per-failure delegate (see [Fallback](#fallback) above); `null`
   attempts only the plan's routes.
-- `capabilityDetector` — optional delegate returning the capability tokens a request provably
-  requires. `null` uses the default detector; `static (_, _) => Array.Empty<string>()` disables the
-  gate by making every route a candidate.
+- `canRoute` — an optional `Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>` that
+  narrows the candidate set for each request (see the `GetCandidateRoutes` step above). `null` (the
+  default) makes every registered route a candidate.
 
 All real behavior lives in `RoutingChatClient` itself; there is no separate assembly step. Bind
 catalog metadata to a client with `ChatRoute.WithClient(client)` (or
@@ -262,11 +260,10 @@ Two things make this design work:
   and be bound to a concrete client later via **`WithClient(client)`**, which returns a copy with the
   same metadata. This separates *what we know about a model* (which changes as providers ship models)
   from *how we call it* (the client) — the "model currency" story.
-- **The mechanism mostly treats metadata as advisory.** The capability gate reads only the open
-  capability tokens declared under `ChatModelCapabilities.PropertyKey`; selectors decide how to use
-  `cost`, `MaxInputTokens`, subjective app-specific properties, and any other metadata. The
-  constructor validates non-negative numerics and a non-blank name, and clones
-  `AdditionalProperties` defensively.
+- **The mechanism treats metadata as advisory.** The router reads only route identity for dispatch;
+  an optional `canRoute` predicate and the selectors decide how to use capability tokens, `cost`,
+  `MaxInputTokens`, subjective app-specific properties, and any other metadata. The constructor
+  validates non-negative numerics and a non-blank name, and clones `AdditionalProperties` defensively.
 
 ### `ChatRouteCatalog.cs` — name → metadata lookup
 
@@ -275,25 +272,13 @@ name; `CreateRoute(name, client)` is sugar for `Get(name).WithClient(client)`. D
 rejected at construction. This is the durable store of "models we know about," decoupled from any
 client — you refresh it (e.g. from a provider catalog snapshot) independently of wiring up clients.
 
-### `ChatModelCapabilities.cs` — objective capability tokens
-
-A static class of well-known **open string tokens** and the `ChatRoute.AdditionalProperties` key used
-to declare them. A route stores an `IEnumerable<string>` under `ChatModelCapabilities.PropertyKey`
-(`"capabilities"`); the router compares that declared set with the tokens a request requires.
-
-The well-known tokens are `Vision` (`"vision"`), `FunctionCalling` (`"function_calling"`),
-`ResponseSchema` (`"response_schema"`), `PdfInput` (`"pdf_input"`), `AudioInput`
-(`"audio_input"`), `Reasoning` (`"reasoning"`), and `WebSearch` (`"web_search"`), named to align
-with LiteLLM's `supports_*` flags. The vocabulary is intentionally open: an app can add a bespoke
-token such as `"legal_reviewed"` with no library change.
-
-The deliberate omission still matters: **subjective dimensions** (a "quality" score, a "coding"
-judgement, "low cost") are **not** well-known capability tokens, because they aren't objective facts
-you can read from a catalog — they're opinions that drift. Put those in
-`ChatRoute.AdditionalProperties` under app-specific keys and have selectors read them. Capability
-tokens are for the correctness gate — "can this route do what the request needs *at all*?" — and not
-as a proxy for quality: most modern chat models share many capabilities, so tokens cannot rank models
-on quality.
+Capability tokens, when an app uses them, are just plain strings under an app-chosen
+`AdditionalProperties` key (the cookbook's LiteLLM loader uses `"capabilities"`); the library defines
+no capability vocabulary. Nothing reads them until a `canRoute` recipe or a selector opts in — so a
+request-carries-an-image correctness rule is an application recipe, not a built-in gate. **Subjective
+dimensions** (a "quality" score, a "coding" judgement, "low cost") likewise live in
+`AdditionalProperties` under app-specific keys for selectors to read; they aren't objective facts you
+can read from a catalog, so keeping them out of any first-class token set is deliberate.
 
 ---
 

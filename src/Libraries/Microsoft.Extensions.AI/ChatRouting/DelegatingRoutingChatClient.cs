@@ -33,7 +33,7 @@ namespace Microsoft.Extensions.AI;
 /// pre-commit failure, and all telemetry — is identical to <see cref="RoutingChatClient"/> because both drive the
 /// same internal engine. Routes here are not bound to a client (any <see cref="ChatRoute.Client"/> is ignored); the
 /// wrapped inner client is always the dispatch target. See <see cref="RoutingChatClient"/> for the semantics of the
-/// <c>selector</c>, <c>onFailure</c>, and <c>capabilityDetector</c> parameters, which behave identically here.
+/// <c>selector</c>, <c>onFailure</c>, and <c>canRoute</c> parameters, which behave identically here.
 /// </para>
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
@@ -53,16 +53,16 @@ public sealed class DelegatingRoutingChatClient : DelegatingChatClient
     /// <param name="routes">The routes to dispatch between. At least one is required; each is metadata only (no bound client is needed).</param>
     /// <param name="selector">The selection policy, or <see langword="null"/> for the opinion-free default. See <see cref="RoutingChatClient"/>.</param>
     /// <param name="onFailure">An optional failure delegate consulted on a pre-commit dispatch failure. See <see cref="RoutingChatClient"/>.</param>
-    /// <param name="capabilityDetector">An optional capability detector narrowing candidate routes. See <see cref="RoutingChatClient"/>.</param>
+    /// <param name="canRoute">An optional candidate filter narrowing which routes the router may consider per request. See <see cref="RoutingChatClient"/>.</param>
     public DelegatingRoutingChatClient(
         IChatClient innerClient,
         IReadOnlyList<ChatRoute> routes,
         IChatRouteSelector? selector = null,
         Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>? onFailure = null,
-        Func<IEnumerable<ChatMessage>, ChatOptions?, IReadOnlyCollection<string>>? capabilityDetector = null)
+        Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? canRoute = null)
         : base(innerClient)
     {
-        _loop = new RouteDispatchLoop(ValidateRoutes(routes), selector, onFailure, capabilityDetector);
+        _loop = new RouteDispatchLoop(ValidateRoutes(routes), selector, onFailure, canRoute);
         _dispatch = (route, messages, options, cancellationToken) =>
             InnerClient.GetResponseAsync(messages, RouteForwarding.Apply(route, options), cancellationToken);
         _streamingDispatch = (route, messages, options, cancellationToken) =>

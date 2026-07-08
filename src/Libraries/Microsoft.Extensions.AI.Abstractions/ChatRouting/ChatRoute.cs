@@ -10,8 +10,8 @@ namespace Microsoft.Extensions.AI;
 
 /// <summary>Describes a route that a <c>RoutingChatClient</c> can dispatch to.</summary>
 /// <remarks>
-/// A route carries optional metadata (provider, model id, context window, cost, latency, and open
-/// capability tokens) and is bound to an <see cref="IChatClient"/> when used at runtime. Because the client
+/// A route carries optional metadata (provider, model id, context window, cost, latency, and any
+/// application-defined properties) and is bound to an <see cref="IChatClient"/> when used at runtime. Because the client
 /// may itself be another <c>RoutingChatClient</c>, a route is a node in a routing tree, not necessarily a
 /// concrete provider model — which is why it is a <em>route</em> rather than a "model". Metadata-only
 /// instances (with no <see cref="Client"/>) can be stored in a <see cref="ChatRouteCatalog"/> and bound to a
@@ -19,9 +19,9 @@ namespace Microsoft.Extensions.AI;
 /// selection policy (an <see cref="IChatRouteSelector"/>) decides how to use it. In particular, no built-in
 /// selector reads the cost, context-window, or latency hints — cost- or context-aware routing is
 /// bring-your-own-selector: supply an <see cref="IChatRouteSelector"/> that reads these properties (and any
-/// <see cref="AdditionalProperties"/>). Capability tokens declared under
-/// <see cref="ChatModelCapabilities.PropertyKey"/> in <see cref="AdditionalProperties"/> are the exception the
-/// mechanism does read, via the router's capability detector.
+/// <see cref="AdditionalProperties"/>). The routing mechanism also reads <see cref="AdditionalProperties"/>
+/// only where an application's own <c>canRoute</c> candidate filter chooses to — for example testing a
+/// capability token the application declared there — never on its own.
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public class ChatRoute
@@ -37,7 +37,7 @@ public class ChatRoute
     /// <param name="typicalLatency">Optional representative latency hint.</param>
     /// <param name="sourceUri">Optional source used for the route metadata.</param>
     /// <param name="updatedAt">Optional time the route metadata was last updated.</param>
-    /// <param name="additionalProperties">Optional additional metadata associated with the route (including capability tokens under <see cref="ChatModelCapabilities.PropertyKey"/>).</param>
+    /// <param name="additionalProperties">Optional additional metadata associated with the route (for example capability tokens an application's own candidate filter reads).</param>
     /// <param name="client">Optional chat client to use when this route is selected.</param>
     public ChatRoute(
         string name,

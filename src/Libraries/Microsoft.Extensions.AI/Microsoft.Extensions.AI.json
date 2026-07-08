@@ -328,7 +328,7 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.DelegatingRoutingChatClient.DelegatingRoutingChatClient(Microsoft.Extensions.AI.IChatClient innerClient, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, System.Collections.Generic.IReadOnlyCollection<string>>? capabilityDetector = null);",
+          "Member": "Microsoft.Extensions.AI.DelegatingRoutingChatClient.DelegatingRoutingChatClient(Microsoft.Extensions.AI.IChatClient innerClient, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<Microsoft.Extensions.AI.ChatRoute, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, bool>? canRoute = null);",
           "Stage": "Experimental"
         },
         {
@@ -350,7 +350,7 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "static Microsoft.Extensions.AI.ChatClientBuilder Microsoft.Extensions.AI.DelegatingRoutingChatClientBuilderExtensions.UseRouting(this Microsoft.Extensions.AI.ChatClientBuilder builder, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, System.Collections.Generic.IReadOnlyCollection<string>>? capabilityDetector = null);",
+          "Member": "static Microsoft.Extensions.AI.ChatClientBuilder Microsoft.Extensions.AI.DelegatingRoutingChatClientBuilderExtensions.UseRouting(this Microsoft.Extensions.AI.ChatClientBuilder builder, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<Microsoft.Extensions.AI.ChatRoute, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, bool>? canRoute = null);",
           "Stage": "Experimental"
         }
       ]
@@ -1586,7 +1586,7 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, System.Collections.Generic.IReadOnlyCollection<string>>? capabilityDetector = null);",
+          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<Microsoft.Extensions.AI.ChatRoute, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, bool>? canRoute = null);",
           "Stage": "Experimental"
         },
         {

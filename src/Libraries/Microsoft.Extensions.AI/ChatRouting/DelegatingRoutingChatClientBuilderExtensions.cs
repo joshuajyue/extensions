@@ -22,7 +22,7 @@ public static class DelegatingRoutingChatClientBuilderExtensions
     /// <param name="routes">The routes to dispatch between. At least one is required; each is metadata only.</param>
     /// <param name="selector">The selection policy, or <see langword="null"/> for the opinion-free default.</param>
     /// <param name="onFailure">An optional failure delegate consulted on a pre-commit dispatch failure.</param>
-    /// <param name="capabilityDetector">An optional capability detector narrowing candidate routes.</param>
+    /// <param name="canRoute">An optional candidate filter narrowing which routes the router may consider per request.</param>
     /// <returns>The <paramref name="builder"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="builder"/> is <see langword="null"/>.</exception>
     public static ChatClientBuilder UseRouting(
@@ -30,11 +30,11 @@ public static class DelegatingRoutingChatClientBuilderExtensions
         IReadOnlyList<ChatRoute> routes,
         IChatRouteSelector? selector = null,
         Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>? onFailure = null,
-        Func<IEnumerable<ChatMessage>, ChatOptions?, IReadOnlyCollection<string>>? capabilityDetector = null)
+        Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? canRoute = null)
     {
         _ = Throw.IfNull(builder);
 
         return builder.Use(innerClient =>
-            new DelegatingRoutingChatClient(innerClient, routes, selector, onFailure, capabilityDetector));
+            new DelegatingRoutingChatClient(innerClient, routes, selector, onFailure, canRoute));
     }
 }

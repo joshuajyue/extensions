@@ -1420,52 +1420,6 @@
       ]
     },
     {
-      "Type": "static class Microsoft.Extensions.AI.ChatModelCapabilities",
-      "Stage": "Experimental",
-      "Fields": [
-        {
-          "Member": "const string Microsoft.Extensions.AI.ChatModelCapabilities.AudioInput",
-          "Stage": "Experimental",
-          "Value": "audio_input"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.ChatModelCapabilities.FunctionCalling",
-          "Stage": "Experimental",
-          "Value": "function_calling"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.ChatModelCapabilities.PdfInput",
-          "Stage": "Experimental",
-          "Value": "pdf_input"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.ChatModelCapabilities.PropertyKey",
-          "Stage": "Experimental",
-          "Value": "capabilities"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.ChatModelCapabilities.Reasoning",
-          "Stage": "Experimental",
-          "Value": "reasoning"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.ChatModelCapabilities.ResponseSchema",
-          "Stage": "Experimental",
-          "Value": "response_schema"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.ChatModelCapabilities.Vision",
-          "Stage": "Experimental",
-          "Value": "vision"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.ChatModelCapabilities.WebSearch",
-          "Stage": "Experimental",
-          "Value": "web_search"
-        }
-      ]
-    },
-    {
       "Type": "sealed class Microsoft.Extensions.AI.ChatRouteContext",
       "Stage": "Experimental",
       "Methods": [

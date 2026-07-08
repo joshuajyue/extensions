@@ -28,8 +28,8 @@ namespace Microsoft.Extensions.AI;
 /// Each pin is resolved against the request's live <see cref="ChatRouteContext.Routes"/> by
 /// <see cref="ChatRoute.Name"/> (case-insensitive), and the resolved instance is the same object the router
 /// matches by reference identity — this selector never reconstructs a <see cref="ChatRoute"/>. A pin to a route
-/// that is not a current candidate (for example one gated out for a missing capability, or removed by an outer
-/// <see cref="CooldownGateChatRouteSelector"/> while it cools) simply does not resolve and is skipped, so a
+/// that is not a current candidate (for example one filtered out for a missing capability, or hidden by the
+/// router's <c>canRoute</c> availability filter while it cools) simply does not resolve and is skipped, so a
 /// stale pin can never dead-end a turn and re-attaches for free once the route is a candidate again. When at
 /// least one pin resolves, the resolved routes (in the callback's order, de-duplicated) become the plan and the
 /// decision is tagged with <see cref="PinnedDecisionKey"/> for telemetry; when none resolve, the inner selector

@@ -136,20 +136,6 @@
       ]
     },
     {
-      "Type": "sealed class Microsoft.Extensions.AI.CooldownGateChatRouteSelector : Microsoft.Extensions.AI.IChatRouteSelector",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.CooldownGateChatRouteSelector.CooldownGateChatRouteSelector(Microsoft.Extensions.AI.RouteCooldownStore cooldowns, Microsoft.Extensions.AI.IChatRouteSelector inner);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan> Microsoft.Extensions.AI.CooldownGateChatRouteSelector.SelectRouteAsync(Microsoft.Extensions.AI.ChatRouteContext context, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
       "Type": "sealed class Microsoft.Extensions.AI.RouteCooldownStore",
       "Stage": "Experimental",
       "Methods": [

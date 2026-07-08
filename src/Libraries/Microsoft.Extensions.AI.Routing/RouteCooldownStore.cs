@@ -30,9 +30,10 @@ namespace Microsoft.Extensions.AI;
 /// </item>
 /// <item>
 /// <description>
-/// The <b>read half</b> is typically a selector that skips any candidate for
-/// which <see cref="IsCooled"/> returns <see langword="true"/>, so a cooling route is not chosen again until
-/// its window elapses.
+/// The <b>read half</b> is typically the routing chat client's <c>canRoute</c> candidate filter, which admits a
+/// route only when <see cref="IsCooled"/> returns <see langword="false"/> for it (for example
+/// <c>canRoute: (route, _, _) =&gt; !cooldowns.IsCooled(route.Name)</c>), so a cooling route is not chosen again
+/// until its window elapses.
 /// </description>
 /// </item>
 /// <item>

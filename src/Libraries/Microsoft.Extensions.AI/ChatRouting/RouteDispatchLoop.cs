@@ -19,7 +19,7 @@ namespace Microsoft.Extensions.AI;
 
 /// <summary>
 /// The client-agnostic engine shared by the routing front doors. It owns everything a routed request needs
-/// <em>except</em> how a chosen route is actually invoked: the capability gate, the one selector call per
+/// <em>except</em> how a chosen route is actually invoked: the candidate filter, the one selector call per
 /// request, the fallback walk, the dedup/termination bookkeeping, and all telemetry. It reads only route
 /// <em>metadata</em> (name, model id, provider) and never touches option shaping or client dispatch — each
 /// front door supplies those as a <c>dispatch</c> closure, the sole per-front-door seam.
@@ -65,19 +65,19 @@ internal sealed class RouteDispatchLoop
     private readonly ChatRoute[] _routes;
     private readonly ReadOnlyCollection<ChatRoute> _routeList;
     private readonly Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>? _onFailure;
-    private readonly Func<IEnumerable<ChatMessage>, ChatOptions?, IReadOnlyCollection<string>> _capabilityDetector;
+    private readonly Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? _canRoute;
 
     internal RouteDispatchLoop(
         ChatRoute[] routes,
         IChatRouteSelector? selector,
         Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>? onFailure,
-        Func<IEnumerable<ChatMessage>, ChatOptions?, IReadOnlyCollection<string>>? capabilityDetector)
+        Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? canRoute)
     {
         _routes = routes;
         _routeList = new ReadOnlyCollection<ChatRoute>(_routes);
         Selector = selector;
         _onFailure = onFailure;
-        _capabilityDetector = capabilityDetector ?? DefaultCapabilityDetector;
+        _canRoute = canRoute;
     }
 
     /// <summary>Gets the selection policy, or <see langword="null"/> for the opinion-free default.</summary>
@@ -262,98 +262,33 @@ internal sealed class RouteDispatchLoop
             ? new ValueTask<ChatRoutePlan>(DefaultSelectRoute(context))
             : Selector.SelectRouteAsync(context, cancellationToken);
 
-    // The router's capability gate. Narrows the registered routes to those that can satisfy the capabilities the
-    // request provably needs, so every selector — and the fallback chain — only ever sees capable candidates. The
-    // required tokens come from the injected capability detector; a route declares the tokens it supports under
-    // ChatModelCapabilities.PropertyKey in its AdditionalProperties, and a route qualifies only when its declared
-    // set is a superset of the required set. The gate is soft: when no registered route positively declares a
-    // required capability (sparse metadata), it returns the full set rather than stranding the request. A detector
-    // that always returns no tokens disables the gate entirely.
+    // The router's candidate filter. Narrows the registered routes to those the caller's optional canRoute
+    // predicate admits for this request, so every selector — and the fallback chain — only ever sees eligible
+    // candidates. The predicate is the single, unopinionated narrowing seam: given a route and the request
+    // (messages and options), it returns whether the router may consider that route. It expresses both
+    // correctness ("this request has an image, so only vision-capable routes qualify") and health ("this route
+    // is cooling, so skip it") — the engine ships no vocabulary of its own for either. When no predicate is
+    // supplied, every registered route is a candidate. The filter is soft: if the predicate admits no route
+    // (for example every route is momentarily cooling), it falls through to the full set rather than stranding
+    // the request, so a predicate narrows preference rather than guaranteeing exclusion; enforce a hard
+    // guarantee in the selector or onFailure if a request must never reach a given route.
     private ReadOnlyCollection<ChatRoute> GetCandidateRoutes(IEnumerable<ChatMessage> messages, ChatOptions? options)
     {
-        IReadOnlyCollection<string> required = _capabilityDetector(messages, options);
-        if (required.Count == 0)
+        if (_canRoute is null)
         {
             return _routeList;
         }
 
-        List<ChatRoute>? capable = null;
+        List<ChatRoute>? eligible = null;
         foreach (ChatRoute route in _routes)
         {
-            if (SupportsAllCapabilities(route, required))
+            if (_canRoute(route, messages, options))
             {
-                (capable ??= new List<ChatRoute>(_routes.Length)).Add(route);
+                (eligible ??= new List<ChatRoute>(_routes.Length)).Add(route);
             }
         }
 
-        return capable is { Count: > 0 } ? new ReadOnlyCollection<ChatRoute>(capable) : _routeList;
-    }
-
-    // The default capability detector. Derives the capabilities a request provably requires using only signals that
-    // cannot be wrong about the request itself: a message carrying image content needs a vision route, and supplying
-    // function-declaration tools needs a function-calling route. Fuzzier dimensions (such as "reasoning") are
-    // deliberately excluded — they are a selector's job to weigh, not a hard correctness gate. Provider-hosted tools
-    // (web search, code interpreter) are also excluded: whether they work is a property of the deployment, not the
-    // request, so require them via a custom detector when the lineup is heterogeneous in that capability.
-    private static IReadOnlyCollection<string> DefaultCapabilityDetector(IEnumerable<ChatMessage> messages, ChatOptions? options)
-    {
-        List<string>? required = null;
-
-        if (options?.Tools is { Count: > 0 } tools && tools.OfType<AIFunctionDeclaration>().Any())
-        {
-            (required ??= []).Add(ChatModelCapabilities.FunctionCalling);
-        }
-
-        if (MessagesContainImage(messages))
-        {
-            (required ??= []).Add(ChatModelCapabilities.Vision);
-        }
-
-        return required is not null ? required : Array.Empty<string>();
-    }
-
-    // Determines whether a route's declared capability tokens (under ChatModelCapabilities.PropertyKey in its
-    // AdditionalProperties) are a superset of the required tokens. A route that declares no tokens can satisfy only
-    // a request that requires none, so it never matches a non-empty requirement here.
-    private static bool SupportsAllCapabilities(ChatRoute route, IReadOnlyCollection<string> required)
-    {
-        if (route.AdditionalProperties is null ||
-            !route.AdditionalProperties.TryGetValue(ChatModelCapabilities.PropertyKey, out object? value) ||
-            value is not IEnumerable<string> tokens)
-        {
-            return false;
-        }
-
-        var supported = new HashSet<string>(tokens, StringComparer.OrdinalIgnoreCase);
-        foreach (string token in required)
-        {
-            if (!supported.Contains(token))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static bool MessagesContainImage(IEnumerable<ChatMessage> messages)
-    {
-        foreach (ChatMessage message in messages)
-        {
-            IList<AIContent> contents = message.Contents;
-            for (int i = 0; i < contents.Count; i++)
-            {
-                switch (contents[i])
-                {
-                    case DataContent data when data.HasTopLevelMediaType("image"):
-                    case UriContent uri when uri.HasTopLevelMediaType("image"):
-                    case HostedFileContent file when file.HasTopLevelMediaType("image"):
-                        return true;
-                }
-            }
-        }
-
-        return false;
+        return eligible is { Count: > 0 } ? new ReadOnlyCollection<ChatRoute>(eligible) : _routeList;
     }
 
     // The initial attempt queue: the selected plan's routes in order, de-duplicated so each is attempted at most
@@ -435,8 +370,8 @@ internal sealed class RouteDispatchLoop
     }
 
     // The failure delegate's lookahead: every untried route still worth attempting, in the router's default
-    // order — the current queue's remaining tail first (preserving the planned order), then any other gated
-    // candidate the plan omitted. Drawn from the gated candidate set, so capability filtering still holds.
+    // order — the current queue's remaining tail first (preserving the planned order), then any other eligible
+    // candidate the plan omitted. Drawn from the filtered candidate set, so the candidate filter still holds.
     private static List<ChatRoute> BuildRemaining(List<ChatRoute> queue, int startIndex, IReadOnlyList<ChatRoute> candidates, HashSet<ChatRoute> tried)
     {
         List<ChatRoute> remaining = BuildQueueTail(queue, startIndex, tried);
