@@ -31,7 +31,7 @@ on `Microsoft.Extensions.AI.Routing`.
 ## The 30-second model
 
 - **Mechanism (`RoutingChatClient` / `UseRouting`)** — opinion-free. It owns the candidate routes,
-  applies an optional `canRoute` filter, runs the selector **once per request**, walks fallbacks on
+  applies an optional `canRoute` filter (§4), runs the selector **once per request**, walks fallbacks on
   failure, and stamps the chosen route onto the response.
 - **Policy (`IChatRouteSelector`)** — all judgment about *which route is better* or *what the user is
   asking for*. Swappable. When you supply none, the default is deterministic: honor a caller-pinned
@@ -60,7 +60,7 @@ public RoutingChatClient(
     IReadOnlyList<ChatRoute> routes,                                                  // ≥ 1, each bound to an IChatClient
     IChatRouteSelector? selector = null,                                              // policy; null = opinion-free default
     Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>? onFailure = null,           // fallback policy (§3)
-    Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? canRoute = null);  // optional candidate filter (§3c/§6)
+    Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? canRoute = null);  // optional candidate filter (§4)
 ```
 
 ### `UseRouting()` / `DelegatingRoutingChatClient` — the profile router (one client)
@@ -203,7 +203,7 @@ ChatRoute[] efforts =
     new ChatRoute("deep",     modelId: "gpt-5.5", reasoningEffort: ReasoningEffort.High),
 ];
 
-// Route harder prompts to higher effort. The complexity selector (§5) is a natural fit:
+// Route harder prompts to higher effort. The complexity selector (§6) is a natural fit:
 var selector = new ComplexityChatRouteSelector(
     new Dictionary<ChatComplexityTier, string>
     {
@@ -271,7 +271,7 @@ public interface IChatRouteSelector
 |---|---|
 | `Messages` | the chat messages being routed |
 | `Options` | the request's `ChatOptions` (or `null`) — read caller hints like `ModelId`, `ConversationId` |
-| `Routes` | the **candidate routes** (already narrowed by the router's optional `canRoute` filter, §3c/§6) |
+| `Routes` | the **candidate routes** (already narrowed by the router's optional `canRoute` filter, §4) |
 
 **Out — `ChatRoutePlan`:**
 
@@ -338,11 +338,11 @@ public sealed class CheapestRouteSelector : IChatRouteSelector
 ```
 
 Selectors compose as decorators — a selector can wrap another selector and adjust its plan. The
-built-in `StickyChatRouteSelector` is exactly this (§5).
+built-in `StickyChatRouteSelector` is exactly this (§6).
 
 ---
 
-## 3. `onFailure`: fallback and circuit-breaking
+## 3. `onFailure`: the fallback policy
 
 A selector that naturally picks **one** route (like a complexity classifier) has no honest ranking of
 the *other* routes. That's what `onFailure` is for. It is the router's fallback policy, invoked on
@@ -362,6 +362,9 @@ routing always terminates.
 
 > **Streaming caveat:** `onFailure` applies only *before the first update is yielded*. Once a token is
 > on the wire, no re-routing occurs. Cancellation is never treated as a failure.
+
+`onFailure` is only about what to do *after* a failed dispatch. To control which routes are *eligible*
+at all — for availability or capability — reach for the `canRoute` filter (§4).
 
 ### 3a. The simplest fallback: try everything left
 
@@ -395,12 +398,47 @@ onFailure: ctx =>
 }
 ```
 
-### 3c. Availability: cool a route on rate-limit / overload (429 / 503 + `Retry-After`)
+---
 
-The archetypal resilience pattern. Route *health* is just another thing that decides whether a route
-is a candidate, so express it with the router's `canRoute` filter — the same seam a capability recipe
-uses (§6). One `RouteCooldownStore` holds the shared, thread-safe state: `onFailure` **writes** to it
-(cool a route on a transient status), and `canRoute` **reads** from it (skip a cooling route).
+## 4. The `canRoute` candidate filter
+
+`onFailure` (§3) decides what to do *after* a dispatch fails. `canRoute` decides which routes are
+even **eligible** in the first place. It is an optional predicate accepted by both front doors:
+
+```csharp
+Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>? canRoute
+```
+
+Given a route and the request (its `Messages` and `Options`), it returns whether the router may
+consider that route this turn. When `canRoute` is `null` — the default — **every registered route is
+a candidate**; the router ships no filtering vocabulary of its own.
+
+**One predicate, both consumers.** The candidate set `canRoute` produces feeds *both* the selector
+(`ChatRouteContext.Routes`, §2) **and** the fallback walk (`RouteFailureContext.Remaining`, §3). A rule
+written once therefore holds everywhere: a route `canRoute` rejects is invisible to the selector *and*
+never resurfaces as a fallback. A selector-only decorator can't achieve this — the fallback walk would
+bypass it — which is why the filter lives on the engine, not inside a selector.
+
+**The filter is soft.** If the predicate admits **no** route for a request, the router falls through to
+the full candidate set rather than stranding the request. So `canRoute` narrows *preference*; it does
+**not** *guarantee* exclusion. When a request must never reach a given route, put that hard guarantee in
+the selector or `onFailure`.
+
+`canRoute` is deliberately unopinionated — one seam for two independent, app-defined concerns:
+
+- **Availability** — route *health*: cool a rate-limited route (§4a) or open a circuit after a streak of
+  failures (§4b). Paired with an `onFailure` that records the fault, `canRoute` reads that state to hide
+  an unhealthy route.
+- **Capability** — request *correctness*: route image requests only to vision models, tool requests only
+  to function-calling models (§4c), over whatever metadata your routes declare.
+
+Neither is a library concept — you own the vocabulary and the rules.
+
+### 4a. Availability: cool a route on rate-limit / overload (429 / 503 + `Retry-After`)
+
+The archetypal availability recipe. One `RouteCooldownStore` holds shared, thread-safe state: `onFailure`
+**writes** to it (cool a route on a transient status) and `canRoute` **reads** from it (skip a cooling
+route).
 
 ```csharp
 using System.ClientModel;             // ClientResultException (OpenAI/Azure adapters surface HTTP here)
@@ -446,22 +484,16 @@ static TimeSpan? GetRetryAfter(ClientResultException ex)
 }
 ```
 
-**Why one place is enough.** `canRoute` narrows the *single* candidate set that both the selector
-**and** the fallback walk draw from, so a cooling route is absent from `ctx.Remaining` too — the naive
-`return ctx.Remaining` above already skips it. (Contrast a selector-only gate, which the fallback walk
-would bypass, forcing you to re-filter the same rule inside `onFailure`.) Clear a cooldown early from a
-success hook with `cooldowns.Clear(routeName)` if you track recoveries.
+Because `canRoute` narrows the *single* candidate set (per the "one predicate, both consumers" rule
+above), a cooling route is absent from `ctx.Remaining` too — the naive `return ctx.Remaining` already
+skips it, so `onFailure` needs no cooldown knowledge of its own. Clear a cooldown early from a success
+hook with `cooldowns.Clear(routeName)` if you track recoveries. For **testability**, inject a clock:
+`new RouteCooldownStore(now: () => fakeClock.UtcNow)`.
 
-The filter is **soft**: if every route is cooling, `canRoute` admits none and the router falls through
-to the full set rather than stranding the request. If a request must *never* reach a cooling route,
-enforce that hard guarantee in the selector or `onFailure` instead.
-
-For **testability**, inject a clock: `new RouteCooldownStore(now: () => fakeClock.UtcNow)`.
-
-### 3d. Circuit breaker: open a route after repeated failures
+### 4b. Circuit breaker: open a route after repeated failures
 
 A cooldown reacts to a single bad response; a **circuit breaker** reacts to a *streak*. It's the same
-read/write split as §3c — `onFailure` records failures, `canRoute` hides an "open" route — over state
+write/read split as §4a — `onFailure` records failures, `canRoute` hides an "open" route — over state
 you own instead of the shipped `RouteCooldownStore`:
 
 ```csharp
@@ -498,15 +530,45 @@ var client = new RoutingChatClient(
     onFailure: ctx => { breaker.OnFailure(ctx.Route.Name); return ctx.Remaining; },
     canRoute: (route, _, _) => !breaker.IsOpen(route.Name));
 
-// Call breaker.OnSuccess(chosenRoute) wherever you read the response's SelectedRouteNameKey (§6).
+// Call breaker.OnSuccess(chosenRoute) wherever you read the response's SelectedRouteNameKey (§7).
 ```
 
 `RouteCooldownStore` is simply the shipped, pre-built version of this read/write pattern for the common
 time-window case; a breaker is the same shape with richer state you own.
 
+### 4c. Requiring a capability (opt-in)
+
+The router ships **no** capability vocabulary and applies **no** filter by default — every registered
+route is a candidate. When you *do* want correctness gating (route image requests only to vision models,
+tool requests only to function-calling models), express it as a `canRoute` recipe over whatever tokens
+your routes declare — for example the `"capabilities"` tokens the §5 catalog loader carries through:
+
+```csharp
+using System.Linq;
+
+static bool Declares(ChatRoute route, string token) =>
+    route.AdditionalProperties?.TryGetValue("capabilities", out object? v) == true
+    && v is IEnumerable<string> tokens
+    && tokens.Contains(token, StringComparer.OrdinalIgnoreCase);
+
+static bool HasImage(IEnumerable<ChatMessage> messages) =>
+    messages.Any(m => m.Contents.Any(c => c is DataContent d && d.HasTopLevelMediaType("image")));
+
+var router = new RoutingChatClient(
+    routes,
+    selector,
+    canRoute: (route, messages, options) =>
+        (!HasImage(messages)                  || Declares(route, "vision")) &&
+        (options?.Tools is not { Count: > 0 } || Declares(route, "function_calling")));
+```
+
+You own the vocabulary and the rules, so nothing is hard-coded into the library. The filter is **soft**
+(above): if no route declares a required capability, the router falls through to the full set rather than
+failing the request — put a hard guarantee in the selector or `onFailure` if you need one.
+
 ---
 
-## 4. Ingesting a model catalog (e.g. LiteLLM)
+## 5. Ingesting a model catalog (e.g. LiteLLM)
 
 Selectors need per-model facts (capabilities, context window, cost) and those facts change as
 providers ship models. `ChatRoute` carries advisory metadata for exactly this, and `ChatRouteCatalog`
@@ -517,7 +579,7 @@ Here's a complete loader for LiteLLM's
 [`model_prices_and_context_window.json`](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json)
 — a maintained, per-model catalog of `supports_*` capability flags, context windows, and token
 pricing. It carries the `supports_*` flags through as plain string tokens (so a `canRoute` recipe or a
-selector can read them — see §6) and converts per-token cost to per-million.
+selector can read them — see §4c) and converts per-token cost to per-million.
 
 ```csharp
 using System.Text.Json;
@@ -538,7 +600,7 @@ static ChatRouteCatalog LoadLiteLlmCatalog(string json, Uri? source = null)
 
         JsonElement spec = model.Value;
 
-        // Carry LiteLLM supports_* flags through as plain capability tokens (see §6 for reading them).
+        // Carry LiteLLM supports_* flags through as plain capability tokens (see §4c for reading them).
         var caps = new List<string>();
         void AddIf(string field, string token)
         {
@@ -607,7 +669,7 @@ var router = new RoutingChatClient(
 ```
 
 > The catalog's `"capabilities"` tokens are plain metadata — nothing reads them until you opt in. Turn
-> them into a candidate filter with a one-line `canRoute` recipe (§6): e.g. narrow image requests to
+> them into a candidate filter with a one-line `canRoute` recipe (§4c): e.g. narrow image requests to
 > routes that declared `vision`, and tool requests to routes that declared `function_calling`.
 
 ### Catalog + `UseRouting()` (one client, no binding)
@@ -633,7 +695,7 @@ IChatClient router = openai.AsBuilder()
     .Build();
 
 // The chosen entry's ModelId (e.g. "gpt-4o-mini") is forwarded to the one OpenAI client; the catalog's
-// capability tokens are there for a canRoute recipe (§6) whenever you want one.
+// capability tokens are there for a canRoute recipe (§4c) whenever you want one.
 var response = await router.GetResponseAsync("What's the capital of France?");
 ```
 
@@ -643,9 +705,9 @@ served by **one** client that honors `ModelId`.
 
 ---
 
-## 5. Built-in selectors, and making routing sticky
+## 6. Built-in selectors, and making routing sticky
 
-### 5a. Semantic selector (embedding similarity)
+### 6a. Semantic selector (embedding similarity)
 
 Give each route a few representative example phrases (its *profile*); the selector embeds the user's
 message and routes to the closest-matching profile. Needs only an
@@ -697,7 +759,7 @@ ChatRoute[] routes =
 IChatClient client = openai.AsBuilder().UseRouting(routes, selector).Build();
 ```
 
-### 5b. Complexity selector (rule-based, zero-latency)
+### 6b. Complexity selector (rule-based, zero-latency)
 
 Deterministic keyword/pattern scoring classifies each request into a `ChatComplexityTier`
 (`Simple`/`Medium`/`Complex`/`Reasoning`), then routes to the route you mapped to that tier. No I/O,
@@ -743,7 +805,7 @@ IChatClient client = openai
     .Build();
 ```
 
-### 5c. Making it sticky (pin a conversation to a route)
+### 6c. Making it sticky (pin a conversation to a route)
 
 `StickyChatRouteSelector` layers conversation stickiness onto *any* inner selector. Crucially, it
 holds **no state**: both the state (*which route a conversation is pinned to*) and the trigger
@@ -794,7 +856,7 @@ var response = await router.GetResponseAsync(messages, options);
 pinsBySession["session-42"] = ["code"];
 ```
 
-A stale pin (e.g. to a route the router's `canRoute` filter excluded this turn — for a missing
+A stale pin (e.g. to a route the router's `canRoute` filter (§4) excluded this turn — for a missing
 capability, or while it cools) simply doesn't resolve and is skipped — it can never dead-end a turn,
 and re-attaches for free once the route is a candidate again. When a pin resolves, the decision is
 tagged `routing.pinned` for telemetry.
@@ -816,7 +878,7 @@ So stickiness is **stateless and additive**: pins are just preferences re-resolv
 against the current candidates, and the selector never *writes* them — your app owns the trigger
 (when to start pinning, when to release) by mutating the state `getPins` reads.
 
-### 5d. Layering selectors with availability
+### 6d. Layering selectors with availability
 
 Two different axes compose cleanly: **selection** stacks as selector decorators, while **availability**
 lives once in `canRoute`. A robust production stack — prefer the pinned route (**sticky**), else choose
@@ -846,11 +908,11 @@ var router = new RoutingChatClient(
 
 Because `canRoute` narrows the candidate set that *both* the sticky pin and the complexity selector see,
 a cooling route can't be pinned to and can't be chosen — and it's absent from the fallback walk too, so
-`onFailure` needs no cooldown knowledge of its own.
+`onFailure` needs no cooldown knowledge of its own. (`GetRetryAfter` is the helper from §4a.)
 
 ---
 
-## 6. More archetypes
+## 7. More archetypes
 
 ### Nested routers (a routing tree)
 
@@ -873,36 +935,6 @@ IChatClient root = new RoutingChatClient(
 Telemetry composes cleanly: each router opens its own span (source
 `RoutingChatClient.ActivitySourceName`), and the winning path is stamped on the response under
 `RoutingChatClient.SelectedPathKey` (e.g. `"eu/gpt-4o-mini"`).
-
-### Requiring a capability (opt-in)
-
-The router ships **no** capability vocabulary and applies **no** filter by default — every registered
-route is a candidate. When you *do* want correctness gating (route image requests only to vision models,
-tool requests only to function-calling models), express it as a `canRoute` recipe over whatever tokens
-your routes declare — for example the `"capabilities"` tokens the §4 catalog loader carries through:
-
-```csharp
-using System.Linq;
-
-static bool Declares(ChatRoute route, string token) =>
-    route.AdditionalProperties?.TryGetValue("capabilities", out object? v) == true
-    && v is IEnumerable<string> tokens
-    && tokens.Contains(token, StringComparer.OrdinalIgnoreCase);
-
-static bool HasImage(IEnumerable<ChatMessage> messages) =>
-    messages.Any(m => m.Contents.Any(c => c is DataContent d && d.HasTopLevelMediaType("image")));
-
-var router = new RoutingChatClient(
-    routes,
-    selector,
-    canRoute: (route, messages, options) =>
-        (!HasImage(messages)                  || Declares(route, "vision")) &&
-        (options?.Tools is not { Count: > 0 } || Declares(route, "function_calling")));
-```
-
-You own the vocabulary and the rules, so nothing is hard-coded into the library. The filter is **soft**
-(§3c): if no route declares a required capability, the router falls through to the full set rather than
-failing the request — put a hard guarantee in the selector or `onFailure` if you need one.
 
 ### Reading the routing decision off the response
 

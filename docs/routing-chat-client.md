@@ -85,8 +85,8 @@ The filter is **soft**: if the predicate admits no route for a request (for exam
 momentarily cooling), the router falls through to the full candidate set rather than stranding the
 request — so `canRoute` narrows *preference*, it does not *guarantee* exclusion. When a request must
 never reach a given route, enforce that hard guarantee in the selector or `onFailure`. See the cookbook
-([`routing-chat-client-cookbook.md`](./routing-chat-client-cookbook.md)) §3c/§3d (availability) and §6
-(capability) for complete recipes.
+([`routing-chat-client-cookbook.md`](./routing-chat-client-cookbook.md)) §4 — the dedicated `canRoute`
+section — for complete availability (§4a/§4b) and capability (§4c) recipes.
 
 ## Building a router
 
