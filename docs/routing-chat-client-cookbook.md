@@ -766,6 +766,23 @@ while it cools) simply doesn't resolve and is skipped — it can never dead-end 
 for free once the route is a candidate again. When a pin resolves, the decision is tagged
 `routing.pinned` for telemetry.
 
+**What happens each turn**, once `getPins` is wired in:
+
+1. **Ask.** The selector calls `getPins(context)` once, getting an ordered list of route *names* (or
+   `null`/empty = "not pinned this turn").
+2. **Resolve against live candidates.** Each name is matched to a route in `context.Routes` by
+   case-insensitive `Name`, de-duped, resolving to the **exact instance** the router matches by
+   reference. A name that isn't a current candidate just doesn't resolve and is skipped.
+3. **Pin, or defer.** If **at least one** name resolved, those routes — in your callback's order —
+   become the plan (first = primary, rest = fallbacks) and the inner selector is **not** called. If
+   **none** resolved (or the callback returned nothing), it falls through to `inner.SelectRouteAsync`.
+4. **Router takes over.** The plan's primary is dispatched, `onFailure`/the plan tail handles fallback,
+   and the chosen route is stamped on the response — exactly as for any other selector.
+
+So stickiness is **stateless and additive**: pins are just preferences re-resolved every request
+against the current candidates, and the selector never *writes* them — your app owns the trigger
+(when to start pinning, when to release) by mutating the state `getPins` reads.
+
 ### 5d. Layering selectors
 
 Selectors are decorators, so you can stack them. A robust production stack: **sticky** (prefer the
