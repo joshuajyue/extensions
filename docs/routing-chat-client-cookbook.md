@@ -555,6 +555,8 @@ static ChatRouteCatalog LoadLiteLlmCatalog(string json, Uri? source = null)
 Use it: keep the catalog as reusable metadata, then bind the entries you route between to concrete
 clients. The `CheapestRouteSelector` from §2 now has real cost/context data to work with.
 
+### Catalog + `RoutingChatClient` (bind per route)
+
 ```csharp
 string json = await httpClient.GetStringAsync(
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json");
@@ -574,6 +576,38 @@ var router = new RoutingChatClient(
 > The catalog's capability tokens automatically feed the router's soft capability gate: a request
 > carrying an image is narrowed to routes that declared `vision`, and a request with tools to routes
 > that declared `function_calling` — no selector code required.
+
+### Catalog + `UseRouting()` (one client, no binding)
+
+With the single-client front door the catalog is even simpler: `UseRouting()` routes are
+**metadata-only**, so you don't bind a client at all — the entries already carry `modelId` (and cost,
+context, capabilities), and the one inner provider client serves them all. Just filter the big catalog
+down to the models that provider actually serves and hand them straight to `UseRouting()`.
+
+```csharp
+using System.Linq;
+using Microsoft.Extensions.AI;
+
+IChatClient anthropic = CreateAnthropicClient(); // one client, honors ChatOptions.ModelId
+
+// Take the catalog entries for this provider as-is — no WithClient needed.
+IReadOnlyList<ChatRoute> anthropicRoutes = catalog.Entries
+    .Where(r => string.Equals(r.ProviderName, "anthropic", StringComparison.OrdinalIgnoreCase))
+    .ToArray();
+
+IChatClient client = anthropic
+    .AsBuilder()
+    .UseRouting(anthropicRoutes, selector: new CheapestRouteSelector()) // real cost/context from the catalog
+    .Build();
+
+// The chosen entry's ModelId (e.g. "claude-haiku-4") is forwarded to the one Anthropic client, and
+// the same catalog capability tokens still drive the soft capability gate.
+var response = await client.GetResponseAsync("What's the capital of France?");
+```
+
+Reach for the bound-client `RoutingChatClient` form above when the catalog spans **multiple**
+providers (each needs its own client); reach for this `UseRouting()` form when every routed model is
+served by **one** client that honors `ModelId`.
 
 ---
 
