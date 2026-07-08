@@ -636,3 +636,43 @@ internal sealed class RouteDispatchLoop
         return route;
     }
 }
+
+#pragma warning disable SA1402 // File may only contain a single type — the shared shaping helper lives beside the engine both front doors drive.
+
+/// <summary>
+/// The one place a routing front door shapes a chosen route's request. Both front doors — the
+/// <see cref="RoutingChatClient"/> multiplexer and the <see cref="DelegatingRoutingChatClient"/> middleware — call
+/// this from their dispatch closure so request-shaping stays identical no matter which surface routed. Kept out of
+/// <see cref="RouteDispatchLoop"/> on purpose: the engine reads route metadata only and never touches options, so
+/// shaping lives here where a new dimension can be added once and both front doors inherit it.
+/// </summary>
+[Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
+internal static class RouteForwarding
+{
+    // Forwards the caller's options on a clone (never mutating the caller's instance), supplying the chosen route's
+    // advisory ModelId and ReasoningEffort — but only where the caller did not already pin them, so an explicit
+    // request always wins over a route default. When the route adds nothing (no such metadata, or the caller pinned
+    // everything), the caller's options are forwarded as-is with no allocation.
+    public static ChatOptions? Apply(ChatRoute route, ChatOptions? options)
+    {
+        bool needsModelId = route.ModelId is not null && options?.ModelId is null;
+        bool needsEffort = route.ReasoningEffort is not null && options?.Reasoning?.Effort is null;
+        if (!needsModelId && !needsEffort)
+        {
+            return options;
+        }
+
+        ChatOptions forwarded = options?.Clone() ?? new ChatOptions();
+        if (needsModelId)
+        {
+            forwarded.ModelId = route.ModelId;
+        }
+
+        if (needsEffort)
+        {
+            (forwarded.Reasoning ??= new ReasoningOptions()).Effort = route.ReasoningEffort;
+        }
+
+        return forwarded;
+    }
+}

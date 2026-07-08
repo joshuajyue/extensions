@@ -4057,7 +4057,7 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.ChatRoute.ChatRoute(string name, string? providerName = null, string? modelId = null, int? maxInputTokens = null, decimal? inputTokenCostPerMillion = null, decimal? outputTokenCostPerMillion = null, System.TimeSpan? typicalLatency = null, System.Uri? sourceUri = null, System.DateTimeOffset? updatedAt = null, Microsoft.Extensions.AI.AdditionalPropertiesDictionary? additionalProperties = null, Microsoft.Extensions.AI.IChatClient? client = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRoute.ChatRoute(string name, string? providerName = null, string? modelId = null, Microsoft.Extensions.AI.ReasoningEffort? reasoningEffort = null, int? maxInputTokens = null, decimal? inputTokenCostPerMillion = null, decimal? outputTokenCostPerMillion = null, System.TimeSpan? typicalLatency = null, System.Uri? sourceUri = null, System.DateTimeOffset? updatedAt = null, Microsoft.Extensions.AI.AdditionalPropertiesDictionary? additionalProperties = null, Microsoft.Extensions.AI.IChatClient? client = null);",
           "Stage": "Experimental"
         },
         {
@@ -4096,6 +4096,10 @@
         },
         {
           "Member": "string? Microsoft.Extensions.AI.ChatRoute.ProviderName { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ReasoningEffort? Microsoft.Extensions.AI.ChatRoute.ReasoningEffort { get; }",
           "Stage": "Experimental"
         },
         {

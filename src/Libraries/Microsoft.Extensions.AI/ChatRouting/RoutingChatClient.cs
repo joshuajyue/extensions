@@ -129,16 +129,16 @@ public class RoutingChatClient : IChatClient
 
     // The per-route dispatch closures handed to the shared RouteDispatchLoop. They are the only place this front
     // door differs from any other routing surface: given the engine's chosen route and the caller's normalized
-    // messages/options, each forwards to that route's own bound IChatClient after supplying the route's provider
-    // model id (via CreateForwardedOptions) when the caller did not pin one. Cached as static readonly to avoid
-    // per-request allocation; they close over nothing.
+    // messages/options, each forwards to that route's own bound IChatClient after applying the route's advisory
+    // options (via the shared RouteForwarding.Apply) when the caller did not pin them. Cached as static readonly to
+    // avoid per-request allocation; they close over nothing.
     private static readonly Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, CancellationToken, Task<ChatResponse>> _dispatch =
         static (route, messages, options, cancellationToken) =>
-            route.Client!.GetResponseAsync(messages, CreateForwardedOptions(route, options), cancellationToken);
+            route.Client!.GetResponseAsync(messages, RouteForwarding.Apply(route, options), cancellationToken);
 
     private static readonly Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, CancellationToken, IAsyncEnumerable<ChatResponseUpdate>> _streamingDispatch =
         static (route, messages, options, cancellationToken) =>
-            route.Client!.GetStreamingResponseAsync(messages, CreateForwardedOptions(route, options), cancellationToken);
+            route.Client!.GetStreamingResponseAsync(messages, RouteForwarding.Apply(route, options), cancellationToken);
 
     // The routes this router owns, retained so Dispose can dispose each bound client exactly once. Every routing
     // decision — the selector call, the capability gate, the fallback walk, and all telemetry — lives in the
@@ -245,21 +245,6 @@ public class RoutingChatClient : IChatClient
                 }
             }
         }
-    }
-
-    private static ChatOptions? CreateForwardedOptions(ChatRoute route, ChatOptions? options)
-    {
-        // The router forwards the caller's options on a clone (never mutating the caller's instance), supplying
-        // the chosen provider model id when the caller did not pin one via ChatOptions.ModelId. When no
-        // adjustment is needed, the caller's options are forwarded as-is.
-        if (route.ModelId is null || options?.ModelId is not null)
-        {
-            return options;
-        }
-
-        ChatOptions forwarded = options?.Clone() ?? new ChatOptions();
-        forwarded.ModelId = route.ModelId;
-        return forwarded;
     }
 
     private static ChatRoute[] ValidateRoutes(IReadOnlyList<ChatRoute> routes)

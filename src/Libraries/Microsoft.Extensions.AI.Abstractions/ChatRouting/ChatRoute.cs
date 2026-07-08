@@ -30,6 +30,7 @@ public class ChatRoute
     /// <param name="name">A stable name identifying this route.</param>
     /// <param name="providerName">Optional provider name.</param>
     /// <param name="modelId">Optional provider-specific model identifier.</param>
+    /// <param name="reasoningEffort">Optional reasoning effort to request when this route is selected.</param>
     /// <param name="maxInputTokens">Optional maximum number of input (context window) tokens the route accepts.</param>
     /// <param name="inputTokenCostPerMillion">Optional input token cost per million tokens.</param>
     /// <param name="outputTokenCostPerMillion">Optional output token cost per million tokens.</param>
@@ -42,6 +43,7 @@ public class ChatRoute
         string name,
         string? providerName = null,
         string? modelId = null,
+        ReasoningEffort? reasoningEffort = null,
         int? maxInputTokens = null,
         decimal? inputTokenCostPerMillion = null,
         decimal? outputTokenCostPerMillion = null,
@@ -74,6 +76,7 @@ public class ChatRoute
         Name = Throw.IfNullOrWhitespace(name);
         ProviderName = providerName;
         ModelId = modelId;
+        ReasoningEffort = reasoningEffort;
         MaxInputTokens = maxInputTokens;
         InputTokenCostPerMillion = inputTokenCostPerMillion;
         OutputTokenCostPerMillion = outputTokenCostPerMillion;
@@ -92,6 +95,15 @@ public class ChatRoute
 
     /// <summary>Gets the optional provider-specific model identifier.</summary>
     public string? ModelId { get; }
+
+    /// <summary>Gets the optional reasoning effort to request when this route is selected.</summary>
+    /// <remarks>
+    /// This is advisory request-shaping metadata, a sibling of <see cref="ModelId"/>: a routing front door applies it
+    /// to <see cref="ChatOptions.Reasoning"/> when this route is chosen and the caller did not already pin an effort.
+    /// It lets a single model be offered as several routes that differ only by effort (for example a low/medium/high
+    /// trio over the same reasoning model). Providers or models that do not support reasoning effort ignore it.
+    /// </remarks>
+    public ReasoningEffort? ReasoningEffort { get; }
 
     /// <summary>Gets the optional maximum number of input (context window) tokens the route accepts.</summary>
     public int? MaxInputTokens { get; }
@@ -125,6 +137,7 @@ public class ChatRoute
             Name,
             ProviderName,
             ModelId,
+            ReasoningEffort,
             MaxInputTokens,
             InputTokenCostPerMillion,
             OutputTokenCostPerMillion,

@@ -13,6 +13,12 @@ Attribution: the complexity selector's approach derives from
 from [Aurelio Labs' `semantic-router`](https://github.com/aurelio-labs/semantic-router). Both are
 MIT-licensed; see [`THIRD-PARTY-NOTICES.TXT`](../THIRD-PARTY-NOTICES.TXT).
 
+> **Looking for end-to-end samples?** See the
+> [RoutingChatClient cookbook](./routing-chat-client-cookbook.md) for worked examples of every
+> archetype: cross-provider, single-provider multi-model, per-reasoning-effort routing via
+> `UseRouting()`, custom selectors, `onFailure` with cooldowns, catalog ingestion (LiteLLM), and the
+> sticky/complexity/semantic selectors.
+
 ## What it is
 
 `RoutingChatClient` is an `IChatClient` that owns **N** candidate models and forwards each
