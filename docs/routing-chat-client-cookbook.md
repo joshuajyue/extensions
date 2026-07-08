@@ -561,6 +561,27 @@ You own the vocabulary and the rules, so nothing is hard-coded into the library.
 (above): if no route declares a required capability, the router falls through to the full set rather than
 failing the request — put a hard guarantee in the selector or `onFailure` if you need one.
 
+### When the filter leaves one candidate
+
+Narrowing has a floor. When `canRoute` admits exactly **one** route and it throws, the fallback walk is
+already empty: the filter removed the alternatives, and the route that just failed is marked tried, so
+the `RouteFailureContext.Remaining` handed to `onFailure` is empty. A plain `onFailure: ctx =>
+ctx.Remaining` — or no `onFailure` at all — then has nothing left to try, and the router **rethrows the
+original exception** to the caller. That is the intended terminal behavior: routing never loops or
+invents a route.
+
+`onFailure` is the escape hatch here, not `canRoute`. The routes it returns are validated only against
+the **registered** set — they are *not* re-checked through the filter — so `onFailure` can deliberately
+reach back to a route `canRoute` excluded for a last-ditch attempt:
+
+```csharp
+// Last resort: if the filtered candidates are exhausted, fall back to *any* registered route.
+onFailure: ctx => ctx.Remaining.Count > 0 ? ctx.Remaining : routes.Except([ctx.Route]).ToList();
+```
+
+And the soft fall-through (above) does not apply here — it rescues only the *zero*-candidate case, where
+`canRoute` admits nothing, not this one where it admits exactly one.
+
 ---
 
 ## 5. Ingesting a model catalog (e.g. LiteLLM)
