@@ -313,10 +313,11 @@ the router's fallback policy, invoked on **each** pre-commit dispatch failure wi
 
 Return the routes to try next, in order — any subset of `Remaining`, reordered as you like — or
 `null`/empty to stop and rethrow. Returned routes are validated to registered routes and de-duped
-against those already attempted, so routing always terminates. When `onFailure` is `null`, only the
-plan's routes are attempted; when the plan's routes and any `onFailure` fallbacks are exhausted, the
-exception of the last attempted route propagates. The route that ultimately succeeds is the one stamped
-on the response.
+against those already attempted, so routing always terminates. When `onFailure` is `null`, the router
+retries only the routes the selector put in the plan; routes the plan omitted are never tried.
+Supplying `onFailure` lets you fall back to those omitted routes too — they appear in `Remaining`. When
+the plan and any `onFailure` fallbacks are exhausted, the last route's exception propagates. The route
+that ultimately succeeds is the one stamped on the response.
 
 ```csharp
 var router = new RoutingChatClient(
