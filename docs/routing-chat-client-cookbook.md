@@ -88,7 +88,7 @@ pass through, so downstream telemetry sees the real provider rather than a synth
 | Your routes are… | Front door | Route needs a bound `Client`? |
 |---|---|---|
 | Different **providers/clients** (OpenAI *and* Anthropic *and* Gemini) | `RoutingChatClient` | Yes — one client per route |
-| Different **models on one provider** where one client serves all via `ModelId` | `UseRouting()` | No — `modelId` only |
+| Different **models on one provider** where one client serves all via `ModelId` (OpenAI, Anthropic, Gemini, …) | `UseRouting()` | No — `modelId` only |
 | The **same model** at different **reasoning efforts** | `UseRouting()` | No — `modelId` + `reasoningEffort` |
 | A mix, or nested routers | `RoutingChatClient` (nest freely) | Yes |
 
@@ -154,34 +154,51 @@ Because each candidate is itself an `IChatClient`, you can give any one of them 
 (e.g. wrap `openai` in `.AsBuilder().UseFunctionInvocation().Build()` before binding it), and you can
 wrap the whole router the same way.
 
-### 1b. Mono-provider selection (many OpenAI models, one client)
+### 1b. Mono-provider selection (many models on one provider client)
 
-When a single OpenAI client already serves many models by honoring `ChatOptions.ModelId`, you don't
-need N clients — use `UseRouting()`. Routes are **metadata only** (`modelId`, no bound `Client`), and
-the router forwards the chosen route's `ModelId` to the one inner client.
+`UseRouting()` works with **any** provider whose `IChatClient` honors a per-request
+`ChatOptions.ModelId` — which most MEAI integrations do, not just OpenAI. So a single provider client
+can serve many models and you never build N clients. Known examples:
+
+- **OpenAI / Azure OpenAI** — `Microsoft.Extensions.AI.OpenAI`.
+- **Anthropic** — [`Anthropic.SDK`](https://www.nuget.org/packages/Anthropic.SDK)'s MEAI integration
+  ([docs](https://deepwiki.com/tghamm/Anthropic.SDK/4.2-microsoft.extensions.ai-integration)); its
+  `IChatClient` reads the per-request model id.
+- **Gemini** —
+  [`GeminiDotnet.Extensions.AI`](https://www.nuget.org/packages/GeminiDotnet.Extensions.AI); one
+  client, model selected per request.
+
+Routes are **metadata only** (`modelId`, no bound `Client`), and the router forwards the chosen
+route's `ModelId` to the one inner client.
 
 ```csharp
 using Microsoft.Extensions.AI;
 
-IChatClient openai = CreateOpenAIClient();
+// Any single provider client that honors ChatOptions.ModelId — OpenAI, Anthropic, Gemini, ...
+IChatClient provider = CreateProviderClient();
 
+// Anthropic model ids shown; swap for gpt-4o-mini/gpt-4o (OpenAI) or gemini-2.5-flash/-pro (Gemini).
 ChatRoute[] routes =
 [
-    new ChatRoute("mini",  modelId: "gpt-4o-mini"),
-    new ChatRoute("std",   modelId: "gpt-4o"),
-    new ChatRoute("large", modelId: "gpt-4.1"),
+    new ChatRoute("small",  modelId: "claude-haiku-4"),
+    new ChatRoute("medium", modelId: "claude-sonnet-4"),
+    new ChatRoute("large",  modelId: "claude-opus-4"),
 ];
 
 // A trivial cost-first selector (see §2) that prefers the cheapest by default.
-IChatClient client = openai
+IChatClient client = provider
     .AsBuilder()
     .UseRouting(routes, selector: new CheapestRouteSelector())
     .Build();
 
-// The router sets options.ModelId = "gpt-4o-mini" (unless the caller pinned one) and forwards
-// to the same OpenAI client. Downstream telemetry still sees the real OpenAI provider.
+// The router sets options.ModelId = "claude-haiku-4" (unless the caller pinned one) and forwards
+// to the same provider client. Downstream telemetry still sees the real provider, not "routing".
 var response = await client.GetResponseAsync("What's the capital of France?");
 ```
+
+> **Requirement:** the inner client must actually honor per-request `ModelId`. If a client is hard-bound
+> to a single model and ignores `ModelId`, `UseRouting()` can't switch models over it — use separate
+> clients bound per route with `RoutingChatClient` (§1a) instead.
 
 ### 1c. Mono-model selection (GPT-5.5 at low / medium / high reasoning)
 
