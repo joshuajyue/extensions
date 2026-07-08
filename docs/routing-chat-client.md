@@ -88,7 +88,7 @@ The constructor takes the following parameters:
 |---|---|---|
 | `routes` | `IReadOnlyList<ChatRoute>` | The candidate routes. Each is typically bound to an `IChatClient`. |
 | `selector` | `IChatRouteSelector?` | The selection policy. When `null`, the [default](#default-selection-behavior) applies. |
-| `onFailure` | `Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>?` | The fallback policy, invoked on each pre-commit dispatch failure. When `null`, only the plan's routes are attempted. |
+| `onFailure` | `Func<RouteFailureContext, IReadOnlyList<ChatRoute>?>?` | The fallback policy, invoked on each pre-commit dispatch failure. When `null`, only the routes the selector put in the plan are retried; set it to also fall back to routes the plan omitted. |
 | `canRoute` | `Func<ChatRoute, IEnumerable<ChatMessage>, ChatOptions?, bool>?` | The candidate filter. When `null`, every registered route is a candidate. |
 
 ```csharp
