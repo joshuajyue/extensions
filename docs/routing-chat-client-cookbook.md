@@ -581,28 +581,27 @@ var router = new RoutingChatClient(
 
 With the single-client front door the catalog is even simpler: `UseRouting()` routes are
 **metadata-only**, so you don't bind a client at all — the entries already carry `modelId` (and cost,
-context, capabilities), and the one inner provider client serves them all. Just filter the big catalog
-down to the models that provider actually serves and hand them straight to `UseRouting()`.
+context, capabilities), and the one inner provider client serves them all. Pull the entries you want
+straight off the catalog with `catalog.Get(name)` — no `WithClient`:
 
 ```csharp
-using System.Linq;
 using Microsoft.Extensions.AI;
 
-IChatClient anthropic = CreateAnthropicClient(); // one client, honors ChatOptions.ModelId
+IChatClient openai = CreateOpenAIClient(); // one client, honors ChatOptions.ModelId
 
-// Take the catalog entries for this provider as-is — no WithClient needed.
-IReadOnlyList<ChatRoute> anthropicRoutes = catalog.Entries
-    .Where(r => string.Equals(r.ProviderName, "anthropic", StringComparison.OrdinalIgnoreCase))
-    .ToArray();
-
-IChatClient client = anthropic
-    .AsBuilder()
-    .UseRouting(anthropicRoutes, selector: new CheapestRouteSelector()) // real cost/context from the catalog
+IChatClient router = openai.AsBuilder()
+    .UseRouting(
+        [
+            catalog.Get("gpt-4o-mini"),   // no WithClient — metadata only
+            catalog.Get("gpt-4o"),
+            catalog.Get("o4-mini"),
+        ],
+        selector: new CheapestRouteSelector())   // sees the same cost/context metadata
     .Build();
 
-// The chosen entry's ModelId (e.g. "claude-haiku-4") is forwarded to the one Anthropic client, and
-// the same catalog capability tokens still drive the soft capability gate.
-var response = await client.GetResponseAsync("What's the capital of France?");
+// The chosen entry's ModelId (e.g. "gpt-4o-mini") is forwarded to the one OpenAI client, and the
+// same catalog capability tokens still drive the soft capability gate.
+var response = await router.GetResponseAsync("What's the capital of France?");
 ```
 
 Reach for the bound-client `RoutingChatClient` form above when the catalog spans **multiple**
