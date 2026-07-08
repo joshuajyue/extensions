@@ -718,26 +718,47 @@ holds **no state**: both the state (*which route a conversation is pinned to*) a
 returned route names still resolve to current candidates, pins to them; otherwise it defers to the
 inner selector.
 
+> **Don't key the pin off `ChatOptions.ConversationId`.** For stateful providers the server *rotates*
+> that id — MEAI documents that `ConversationId` "might differ on every response … [if the provider]
+> updates it for each message" (see `ChatResponse.ConversationId` remarks), so it is **not** a stable
+> session key and a pin keyed on it would be lost the moment the id changes. Key the pin on a **stable,
+> app-owned** session identifier instead — one you control for the lifetime of the conversation. Below
+> it rides in `ChatOptions.AdditionalProperties` under an app-specific key, but an ambient
+> `AsyncLocal`, a DI-scoped session object, or a user/thread id work just as well.
+
 ```csharp
 using System.Collections.Concurrent;
 using Microsoft.Extensions.AI;
 
-// App-owned pin state, keyed by conversation. You decide when to write it.
-var pinsByConversation = new ConcurrentDictionary<string, IReadOnlyList<string>>();
+const string SessionKey = "app.session_id"; // your stable key, NOT ConversationId
+
+// App-owned pin state, keyed by your stable session id. You decide when to write it.
+var pinsBySession = new ConcurrentDictionary<string, IReadOnlyList<string>>();
 
 var sticky = new StickyChatRouteSelector(
     getPins: ctx =>
     {
-        string? convo = ctx.Options?.ConversationId;
-        return convo is not null && pinsByConversation.TryGetValue(convo, out var pins) ? pins : null;
+        // Read the stable session id the caller attached to the request.
+        return ctx.Options?.AdditionalProperties?.TryGetValue(SessionKey, out object? id) == true
+            && id is string session
+            && pinsBySession.TryGetValue(session, out var pins)
+                ? pins
+                : null;
     },
     inner: new SemanticChatRouteSelector(embeddings, profiles, defaultRoute: "chat"));
 
 var router = new RoutingChatClient(routes, sticky);
 
-// Elsewhere in your app — after the first turn picks a route, pin the conversation to it so
-// follow-ups stay on the same model:
-pinsByConversation["conversation-42"] = ["code"];
+// Caller attaches the same stable id on every turn of the conversation:
+var options = new ChatOptions
+{
+    AdditionalProperties = new AdditionalPropertiesDictionary { [SessionKey] = "session-42" },
+};
+var response = await router.GetResponseAsync(messages, options);
+
+// Elsewhere in your app — after the first turn picks a route, pin the session to it so follow-ups
+// stay on the same model:
+pinsBySession["session-42"] = ["code"];
 ```
 
 A stale pin (e.g. to a route the capability gate excluded this turn, or one a `CooldownGate` is hiding
