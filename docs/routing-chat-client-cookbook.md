@@ -1,15 +1,11 @@
 # RoutingChatClient: a cookbook of use cases
 
 > Everything here is **experimental** (diagnostic id `MEAI001`) and lives in the
-> `Microsoft.Extensions.AI` namespace. This is a **samples-first** companion to the two existing
-> design docs — read them for the *why*:
+> `Microsoft.Extensions.AI` namespace. This is a **samples-first** companion to the formal reference —
+> read it for the *why* (mechanism vs. policy, the candidate filter, the built-in selectors, and
+> telemetry):
 >
-> - [`routing-chat-client.md`](./routing-chat-client.md) — the user-facing how-to (mechanism vs.
->   policy, the candidate filter, telemetry).
-> - [`chat-routing-architecture.md`](./chat-routing-architecture.md) — the file-by-file architecture
->   deep dive.
-> - [`semantic-chat-client-selection.md`](./semantic-chat-client-selection.md) — the semantic
->   selector in depth.
+> - [`routing-chat-client.md`](./routing-chat-client.md) — route chat requests with `RoutingChatClient`.
 >
 > This document walks the archetypal scenarios end to end and shows the code for each.
 
@@ -756,7 +752,9 @@ var router = new RoutingChatClient(
 Profiles are embedded once and cached. Because the semantic selector produces a **ranked** plan
 (primary first, others by descending similarity), its tail *is* a fallback chain — you often don't
 need `onFailure` with it. Tune `TopK`, `Aggregation`, and `ScoreThreshold` (global or per-route) via
-`SemanticRouterOptions`. See [`semantic-chat-client-selection.md`](./semantic-chat-client-selection.md).
+`SemanticRouterOptions`. See the
+[semantic selector reference](./routing-chat-client.md#semantic-selector) for the full algorithm and
+options.
 
 The selector is **front-door agnostic** — it only picks a route by name — so the *same* instance drives
 `UseRouting()` when your routes are models on one client. Keep the profile keys equal to the route
