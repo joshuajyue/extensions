@@ -16,12 +16,10 @@ namespace Microsoft.Extensions.AI;
 /// concrete provider model — which is why it is a <em>route</em> rather than a "model". Metadata-only
 /// instances (with no <see cref="Client"/>) can be stored in a <see cref="ChatRouteCatalog"/> and bound to a
 /// concrete client later. The metadata is advisory: the routing mechanism never interprets it, and only a
-/// selection policy (an <see cref="IChatRouteSelector"/>) decides how to use it. In particular, no built-in
-/// selector reads the cost, context-window, or latency hints — cost- or context-aware routing is
-/// bring-your-own-selector: supply an <see cref="IChatRouteSelector"/> that reads these properties (and any
-/// <see cref="AdditionalProperties"/>). The routing mechanism also reads <see cref="AdditionalProperties"/>
-/// only where an application's own <c>canRoute</c> candidate filter chooses to — for example testing a
-/// capability token the application declared there — never on its own.
+/// <c>RoutingChatClient</c> subclass's selection policy decides how to use it. In particular, the built-in
+/// <c>FailoverChatClient</c> ignores the cost, context-window, and latency hints — cost- or context-aware
+/// routing is bring-your-own: derive from <c>RoutingChatClient</c> and read these properties (and any
+/// <see cref="AdditionalProperties"/>) in your override of the route-selection method.
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public class ChatRoute

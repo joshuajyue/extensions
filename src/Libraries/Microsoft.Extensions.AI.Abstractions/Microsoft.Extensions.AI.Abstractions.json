@@ -1420,63 +1420,93 @@
       ]
     },
     {
-      "Type": "sealed class Microsoft.Extensions.AI.ChatRouteContext",
+      "Type": "class Microsoft.Extensions.AI.ChatRoute",
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.ChatRouteContext.ChatRouteContext(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes);",
+          "Member": "Microsoft.Extensions.AI.ChatRoute.ChatRoute(string name, string? providerName = null, string? modelId = null, Microsoft.Extensions.AI.ReasoningEffort? reasoningEffort = null, int? maxInputTokens = null, decimal? inputTokenCostPerMillion = null, decimal? outputTokenCostPerMillion = null, System.TimeSpan? typicalLatency = null, System.Uri? sourceUri = null, System.DateTimeOffset? updatedAt = null, Microsoft.Extensions.AI.AdditionalPropertiesDictionary? additionalProperties = null, Microsoft.Extensions.AI.IChatClient? client = null);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.ChatRoute.WithClient(Microsoft.Extensions.AI.IChatClient client);",
           "Stage": "Experimental"
         }
       ],
       "Properties": [
         {
-          "Member": "System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> Microsoft.Extensions.AI.ChatRouteContext.Messages { get; }",
+          "Member": "Microsoft.Extensions.AI.AdditionalPropertiesDictionary? Microsoft.Extensions.AI.ChatRoute.AdditionalProperties { get; }",
           "Stage": "Experimental"
         },
         {
-          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> Microsoft.Extensions.AI.ChatRouteContext.Routes { get; }",
+          "Member": "Microsoft.Extensions.AI.IChatClient? Microsoft.Extensions.AI.ChatRoute.Client { get; }",
           "Stage": "Experimental"
         },
         {
-          "Member": "Microsoft.Extensions.AI.ChatOptions? Microsoft.Extensions.AI.ChatRouteContext.Options { get; }",
+          "Member": "decimal? Microsoft.Extensions.AI.ChatRoute.InputTokenCostPerMillion { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "int? Microsoft.Extensions.AI.ChatRoute.MaxInputTokens { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "string? Microsoft.Extensions.AI.ChatRoute.ModelId { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "string Microsoft.Extensions.AI.ChatRoute.Name { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "decimal? Microsoft.Extensions.AI.ChatRoute.OutputTokenCostPerMillion { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "string? Microsoft.Extensions.AI.ChatRoute.ProviderName { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ReasoningEffort? Microsoft.Extensions.AI.ChatRoute.ReasoningEffort { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.Uri? Microsoft.Extensions.AI.ChatRoute.SourceUri { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.TimeSpan? Microsoft.Extensions.AI.ChatRoute.TypicalLatency { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "System.DateTimeOffset? Microsoft.Extensions.AI.ChatRoute.UpdatedAt { get; }",
           "Stage": "Experimental"
         }
       ]
     },
     {
-      "Type": "sealed class Microsoft.Extensions.AI.ChatRoutePlan",
+      "Type": "class Microsoft.Extensions.AI.ChatRouteCatalog",
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(Microsoft.Extensions.AI.ChatRoute route, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRouteCatalog.ChatRouteCatalog(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatRoute> entries);",
           "Stage": "Experimental"
         },
         {
-          "Member": "Microsoft.Extensions.AI.ChatRoutePlan.ChatRoutePlan(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> orderedRoutes, System.Collections.Generic.IReadOnlyDictionary<string, object>? decisionMetadata = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.ChatRouteCatalog.CreateRoute(string name, Microsoft.Extensions.AI.IChatClient client);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.ChatRouteCatalog.Get(string name);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "bool Microsoft.Extensions.AI.ChatRouteCatalog.TryGet(string name, out Microsoft.Extensions.AI.ChatRoute? entry);",
           "Stage": "Experimental"
         }
       ],
       "Properties": [
         {
-          "Member": "System.Collections.Generic.IReadOnlyDictionary<string, object>? Microsoft.Extensions.AI.ChatRoutePlan.DecisionMetadata { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> Microsoft.Extensions.AI.ChatRoutePlan.OrderedRoutes { get; }",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
-      "Type": "static class Microsoft.Extensions.AI.ChatRouteSelector",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "static Microsoft.Extensions.AI.IChatRouteSelector Microsoft.Extensions.AI.ChatRouteSelector.Create(System.Func<Microsoft.Extensions.AI.ChatRouteContext, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan>> selector);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "static Microsoft.Extensions.AI.IChatRouteSelector Microsoft.Extensions.AI.ChatRouteSelector.Create(System.Func<Microsoft.Extensions.AI.ChatRouteContext, Microsoft.Extensions.AI.ChatRoutePlan> selector);",
+          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> Microsoft.Extensions.AI.ChatRouteCatalog.Entries { get; }",
           "Stage": "Experimental"
         }
       ]
@@ -2854,16 +2884,6 @@
       ]
     },
     {
-      "Type": "interface Microsoft.Extensions.AI.IChatRouteSelector",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoutePlan> Microsoft.Extensions.AI.IChatRouteSelector.SelectRouteAsync(Microsoft.Extensions.AI.ChatRouteContext context, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
       "Type": "interface Microsoft.Extensions.AI.IEmbeddingGenerator : System.IDisposable",
       "Stage": "Stable",
       "Methods": [
@@ -4002,98 +4022,6 @@
         },
         {
           "Member": "string? Microsoft.Extensions.AI.ResponseOutputItemRealtimeServerMessage.ResponseId { get; set; }",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
-      "Type": "class Microsoft.Extensions.AI.ChatRoute",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRoute.ChatRoute(string name, string? providerName = null, string? modelId = null, Microsoft.Extensions.AI.ReasoningEffort? reasoningEffort = null, int? maxInputTokens = null, decimal? inputTokenCostPerMillion = null, decimal? outputTokenCostPerMillion = null, System.TimeSpan? typicalLatency = null, System.Uri? sourceUri = null, System.DateTimeOffset? updatedAt = null, Microsoft.Extensions.AI.AdditionalPropertiesDictionary? additionalProperties = null, Microsoft.Extensions.AI.IChatClient? client = null);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.ChatRoute.WithClient(Microsoft.Extensions.AI.IChatClient client);",
-          "Stage": "Experimental"
-        }
-      ],
-      "Properties": [
-        {
-          "Member": "Microsoft.Extensions.AI.AdditionalPropertiesDictionary? Microsoft.Extensions.AI.ChatRoute.AdditionalProperties { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.IChatClient? Microsoft.Extensions.AI.ChatRoute.Client { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "decimal? Microsoft.Extensions.AI.ChatRoute.InputTokenCostPerMillion { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "int? Microsoft.Extensions.AI.ChatRoute.MaxInputTokens { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "string? Microsoft.Extensions.AI.ChatRoute.ModelId { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "string Microsoft.Extensions.AI.ChatRoute.Name { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "decimal? Microsoft.Extensions.AI.ChatRoute.OutputTokenCostPerMillion { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "string? Microsoft.Extensions.AI.ChatRoute.ProviderName { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ReasoningEffort? Microsoft.Extensions.AI.ChatRoute.ReasoningEffort { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Uri? Microsoft.Extensions.AI.ChatRoute.SourceUri { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.TimeSpan? Microsoft.Extensions.AI.ChatRoute.TypicalLatency { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.DateTimeOffset? Microsoft.Extensions.AI.ChatRoute.UpdatedAt { get; }",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
-      "Type": "class Microsoft.Extensions.AI.ChatRouteCatalog",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRouteCatalog.ChatRouteCatalog(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatRoute> entries);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.ChatRouteCatalog.CreateRoute(string name, Microsoft.Extensions.AI.IChatClient client);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.ChatRouteCatalog.Get(string name);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "bool Microsoft.Extensions.AI.ChatRouteCatalog.TryGet(string name, out Microsoft.Extensions.AI.ChatRoute? entry);",
-          "Stage": "Experimental"
-        }
-      ],
-      "Properties": [
-        {
-          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> Microsoft.Extensions.AI.ChatRouteCatalog.Entries { get; }",
           "Stage": "Experimental"
         }
       ]

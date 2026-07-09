@@ -324,38 +324,6 @@
       ]
     },
     {
-      "Type": "class Microsoft.Extensions.AI.DelegatingRoutingChatClient : Microsoft.Extensions.AI.DelegatingChatClient",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.DelegatingRoutingChatClient.DelegatingRoutingChatClient(Microsoft.Extensions.AI.IChatClient innerClient, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<Microsoft.Extensions.AI.ChatRoute, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, bool>? canRoute = null);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "override System.Threading.Tasks.Task<Microsoft.Extensions.AI.ChatResponse> Microsoft.Extensions.AI.DelegatingRoutingChatClient.GetResponseAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "override object? Microsoft.Extensions.AI.DelegatingRoutingChatClient.GetService(System.Type serviceType, object? serviceKey = null);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "override System.Collections.Generic.IAsyncEnumerable<Microsoft.Extensions.AI.ChatResponseUpdate> Microsoft.Extensions.AI.DelegatingRoutingChatClient.GetStreamingResponseAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
-      "Type": "static class Microsoft.Extensions.AI.DelegatingRoutingChatClientBuilderExtensions",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "static Microsoft.Extensions.AI.ChatClientBuilder Microsoft.Extensions.AI.DelegatingRoutingChatClientBuilderExtensions.UseRouting(this Microsoft.Extensions.AI.ChatClientBuilder builder, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<Microsoft.Extensions.AI.ChatRoute, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, bool>? canRoute = null);",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
       "Type": "class Microsoft.Extensions.AI.DistributedCachingChatClient : Microsoft.Extensions.AI.CachingChatClient",
       "Stage": "Stable",
       "Methods": [
@@ -506,6 +474,20 @@
         {
           "Member": "static Microsoft.Extensions.AI.EmbeddingGeneratorBuilder<TInput, TEmbedding> Microsoft.Extensions.DependencyInjection.EmbeddingGeneratorBuilderServiceCollectionExtensions.AddKeyedEmbeddingGenerator<TInput, TEmbedding>(this Microsoft.Extensions.DependencyInjection.IServiceCollection serviceCollection, object? serviceKey, System.Func<System.IServiceProvider, Microsoft.Extensions.AI.IEmbeddingGenerator<TInput, TEmbedding>> innerGeneratorFactory, Microsoft.Extensions.DependencyInjection.ServiceLifetime lifetime = Microsoft.Extensions.DependencyInjection.ServiceLifetime.Singleton);",
           "Stage": "Stable"
+        }
+      ]
+    },
+    {
+      "Type": "sealed class Microsoft.Extensions.AI.FailoverChatClient : Microsoft.Extensions.AI.RoutingChatClient",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.FailoverChatClient.FailoverChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes);",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "override System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoute?> Microsoft.Extensions.AI.FailoverChatClient.SelectNextRouteAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> attempted, System.Exception? lastException, System.Threading.CancellationToken cancellationToken);",
+          "Stage": "Experimental"
         }
       ]
     },
@@ -1546,47 +1528,11 @@
       ]
     },
     {
-      "Type": "sealed class Microsoft.Extensions.AI.RouteFailureContext",
+      "Type": "abstract class Microsoft.Extensions.AI.RoutingChatClient : Microsoft.Extensions.AI.IChatClient, System.IDisposable",
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.RouteFailureContext.RouteFailureContext(Microsoft.Extensions.AI.ChatRoute route, System.Exception exception, int attemptNumber, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> remaining, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages);",
-          "Stage": "Experimental"
-        }
-      ],
-      "Properties": [
-        {
-          "Member": "int Microsoft.Extensions.AI.RouteFailureContext.AttemptNumber { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Exception Microsoft.Extensions.AI.RouteFailureContext.Exception { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> Microsoft.Extensions.AI.RouteFailureContext.Messages { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ChatOptions? Microsoft.Extensions.AI.RouteFailureContext.Options { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> Microsoft.Extensions.AI.RouteFailureContext.Remaining { get; }",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.RouteFailureContext.Route { get; }",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
-      "Type": "class Microsoft.Extensions.AI.RoutingChatClient : Microsoft.Extensions.AI.IChatClient, System.IDisposable",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, Microsoft.Extensions.AI.IChatRouteSelector? selector = null, System.Func<Microsoft.Extensions.AI.RouteFailureContext, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute>?>? onFailure = null, System.Func<Microsoft.Extensions.AI.ChatRoute, System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage>, Microsoft.Extensions.AI.ChatOptions?, bool>? canRoute = null);",
+          "Member": "Microsoft.Extensions.AI.RoutingChatClient.RoutingChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes);",
           "Stage": "Experimental"
         },
         {
@@ -1607,6 +1553,10 @@
         },
         {
           "Member": "System.Collections.Generic.IAsyncEnumerable<Microsoft.Extensions.AI.ChatResponseUpdate> Microsoft.Extensions.AI.RoutingChatClient.GetStreamingResponseAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "abstract System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoute?> Microsoft.Extensions.AI.RoutingChatClient.SelectNextRouteAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> attempted, System.Exception? lastException, System.Threading.CancellationToken cancellationToken);",
           "Stage": "Experimental"
         }
       ],
@@ -1645,6 +1595,12 @@
           "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedRouteNameKey",
           "Stage": "Experimental",
           "Value": "routing.selected_route"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> Microsoft.Extensions.AI.RoutingChatClient.Routes { get; }",
+          "Stage": "Experimental"
         }
       ]
     },
