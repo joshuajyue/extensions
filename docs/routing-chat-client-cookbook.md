@@ -1,6 +1,6 @@
 # RoutingChatClient: a cookbook of use cases
 
-This cookbook shows how to solve real routing problems with the two routing types. For the reference
+This cookbook shows how to solve real routing problems with `RoutingChatClient`. For the reference
 description, see [routing-chat-client.md](./routing-chat-client.md).
 
 > [!IMPORTANT]
@@ -14,7 +14,7 @@ Everything is in the `Microsoft.Extensions.AI` namespace.
 | Package | Types |
 |---|---|
 | `Microsoft.Extensions.AI.Abstractions` | `ChatRoute`, `ChatRouteCatalog` |
-| `Microsoft.Extensions.AI` | `RoutingChatClient` (abstract), `FailoverChatClient` (sealed) |
+| `Microsoft.Extensions.AI` | `RoutingChatClient` (abstract) |
 
 ## The 30-second model
 
@@ -31,23 +31,57 @@ reference); a route already in `attempted` stops the loop; `null` on the first c
 a failure rethrows the last exception; cancellation never triggers fallback; when streaming, fallback
 stops once the first token is on the wire.
 
-You either **use `FailoverChatClient`** (ordered try-until-success) or **derive from
-`RoutingChatClient`** and override the one method.
+You **derive from `RoutingChatClient`** and override the one method. The simplest policy — ordered
+failover (try each route until one succeeds) — is the short subclass shown in section 1; richer policies
+follow the same shape.
 
 ---
 
-## 1. Ordered failover with `FailoverChatClient`
+## 1. Ordered failover
 
-The built-in policy. Bind each route to its `IChatClient` and list them in fallback order.
+The most common policy. It honors an explicitly requested model first, otherwise the first route, then
+falls back through the remaining routes in registration order. It's a short `RoutingChatClient` subclass
+— copy it as-is or use it as a template:
 
 ```csharp
 using Microsoft.Extensions.AI;
 
+public sealed class OrderedFailoverClient : RoutingChatClient
+{
+    public OrderedFailoverClient(IReadOnlyList<ChatRoute> routes) : base(routes) { }
+
+    protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+        IEnumerable<ChatMessage> messages,
+        ChatOptions? options,
+        IReadOnlyList<ChatRoute> routes,
+        IReadOnlyList<ChatRoute> attempted,
+        Exception? lastException,
+        CancellationToken cancellationToken)
+    {
+        if (attempted.Count == 0)
+        {
+            ChatRoute? pinned = options?.ModelId is { } id
+                ? routes.FirstOrDefault(r =>
+                    string.Equals(r.ModelId, id, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(r.Name, id, StringComparison.OrdinalIgnoreCase))
+                : null;
+
+            return new(pinned ?? routes[0]);
+        }
+
+        return new(routes.Except(attempted).FirstOrDefault());
+    }
+}
+```
+
+Bind each route to its `IChatClient` and list them in fallback order:
+
+```csharp
 IChatClient anthropic = CreateAnthropicClient();
 IChatClient gemini    = CreateGeminiClient();
 IChatClient openai    = CreateOpenAIClient();
 
-IChatClient router = new FailoverChatClient(
+IChatClient router = new OrderedFailoverClient(
 [
     new ChatRoute("claude-sonnet", providerName: "anthropic", modelId: "claude-sonnet-4", client: anthropic),
     new ChatRoute("gemini-flash",  providerName: "google",    modelId: "gemini-2.5-flash", client: gemini),
@@ -70,7 +104,7 @@ can wrap the whole router the same way.
 ### Register in DI
 
 ```csharp
-services.AddChatClient(sp => new FailoverChatClient(
+services.AddChatClient(sp => new OrderedFailoverClient(
 [
     new ChatRoute("primary", client: sp.GetRequiredKeyedService<IChatClient>("primary")),
     new ChatRoute("backup",  client: sp.GetRequiredKeyedService<IChatClient>("backup")),
@@ -97,7 +131,7 @@ ChatRoute pick = routes.First(r =>
 
 ### Cheapest-that-fits (reads advisory metadata)
 
-This reads the `ChatRoute` cost and context-window hints that `FailoverChatClient` ignores, and returns
+This reads the `ChatRoute` cost and context-window hints that ordered failover ignores, and returns
 the cheapest route not yet tried — so the loop forms a cost-ordered fallback chain.
 
 ```csharp
@@ -222,7 +256,7 @@ static ChatRouteCatalog LoadLiteLlm(JsonDocument doc)
 // Bind the entries you want to a router:
 ChatRouteCatalog catalog = LoadLiteLlm(JsonDocument.Parse(json));
 
-IChatClient router = new FailoverChatClient(
+IChatClient router = new OrderedFailoverClient(
 [
     catalog.Get("gpt-4o-mini").WithClient(openai),
     catalog.Get("claude-3-5-sonnet").WithClient(anthropic),
@@ -238,8 +272,8 @@ IChatClient router = new FailoverChatClient(
 A route's `Client` can be another `RoutingChatClient`. Route coarsely at the top, finely below:
 
 ```csharp
-IChatClient usRouter = new FailoverChatClient(usRoutes);
-IChatClient euRouter = new FailoverChatClient(euRoutes);
+IChatClient usRouter = new OrderedFailoverClient(usRoutes);
+IChatClient euRouter = new OrderedFailoverClient(euRoutes);
 
 IChatClient root = new RegionRouterClient(   // your RoutingChatClient subclass
 [
@@ -275,8 +309,8 @@ For the full trace-event schema (`routing.decision`, `routing.attempt`), see
 
 | I want to… | Reach for |
 |---|---|
-| Try routes **in order until one works** | `FailoverChatClient` |
-| **Pin** a request to a specific model/route | `ChatOptions.ModelId` (matched by `FailoverChatClient`) |
+| Try routes **in order until one works** | an ordered-failover `RoutingChatClient` subclass (section 1) |
+| **Pin** a request to a specific model/route | `ChatOptions.ModelId` (read in your `SelectNextRouteAsync`) |
 | Route across **different providers/clients** | routes bound via `client:` / `WithClient` |
 | **Cheapest that fits** | a `RoutingChatClient` subclass reading `ChatRoute` cost/context metadata |
 | **Fall back** after a failure | later `SelectNextRouteAsync` calls (branch on `lastException`) |

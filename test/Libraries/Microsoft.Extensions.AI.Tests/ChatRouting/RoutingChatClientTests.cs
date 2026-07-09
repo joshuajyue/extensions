@@ -38,20 +38,20 @@ public class RoutingChatClientTests
     [Fact]
     public void Constructor_RejectsEmptyRoutes()
     {
-        Assert.Throws<ArgumentException>(() => new FailoverChatClient([]));
+        Assert.Throws<ArgumentException>(() => new OrderedFailoverRouter([]));
     }
 
     [Fact]
     public void Constructor_RejectsRouteWithoutClient()
     {
-        Assert.Throws<ArgumentException>(() => new FailoverChatClient([new ChatRoute("m1")]));
+        Assert.Throws<ArgumentException>(() => new OrderedFailoverRouter([new ChatRoute("m1")]));
     }
 
     [Fact]
     public void Constructor_RejectsDuplicateNamesCaseInsensitively()
     {
         using var inner = new TestChatClient();
-        Assert.Throws<ArgumentException>(() => new FailoverChatClient(
+        Assert.Throws<ArgumentException>(() => new OrderedFailoverRouter(
         [
             new ChatRoute("m1", client: inner),
             new ChatRoute("M1", client: inner),
@@ -62,7 +62,7 @@ public class RoutingChatClientTests
     public void GetService_ReturnsRoutingChatClientMetadata()
     {
         using var inner = new TestChatClient();
-        using var client = new FailoverChatClient([new ChatRoute("m1", client: inner)]);
+        using var client = new OrderedFailoverRouter([new ChatRoute("m1", client: inner)]);
 
         var metadata = client.GetService(typeof(ChatClientMetadata)) as ChatClientMetadata;
         Assert.NotNull(metadata);
@@ -73,15 +73,15 @@ public class RoutingChatClientTests
     public void GetService_ReturnsSelf_AndNullForUnknownOrKeyed()
     {
         using var inner = new TestChatClient();
-        using var client = new FailoverChatClient([new ChatRoute("m1", client: inner)]);
+        using var client = new OrderedFailoverRouter([new ChatRoute("m1", client: inner)]);
 
         // The concrete client and its abstract base both resolve to the instance.
-        Assert.Same(client, client.GetService(typeof(FailoverChatClient)));
+        Assert.Same(client, client.GetService(typeof(OrderedFailoverRouter)));
         Assert.Same(client, client.GetService(typeof(RoutingChatClient)));
         Assert.Same(client, client.GetService(typeof(IChatClient)));
 
         // A keyed lookup or an unrelated type resolves to nothing.
-        Assert.Null(client.GetService(typeof(FailoverChatClient), serviceKey: "k"));
+        Assert.Null(client.GetService(typeof(OrderedFailoverRouter), serviceKey: "k"));
         Assert.Null(client.GetService(typeof(string)));
     }
 
@@ -103,7 +103,7 @@ public class RoutingChatClientTests
             }
         };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
             [new ChatRoute("m1", providerName: "openai", modelId: "gpt-4o-mini", client: inner)]);
 
         ChatResponse response = await client.GetResponseAsync(messages, options, CancellationToken.None);
@@ -135,7 +135,7 @@ public class RoutingChatClientTests
         using var c1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r1) };
         using var c2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r2) };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("m1", modelId: "gpt-a", client: c1),
             new ChatRoute("m2", modelId: "gpt-b", client: c2),
@@ -156,7 +156,7 @@ public class RoutingChatClientTests
         using var c1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r1) };
         using var c2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r2) };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("first", modelId: "gpt-a", client: c1),
             new ChatRoute("GPT-4o", modelId: "openai/GPT-4o", client: c2),
@@ -181,7 +181,7 @@ public class RoutingChatClientTests
         using var c1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r1) };
         using var c2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(r2) };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("m1", modelId: "gpt-a", client: c1),
             new ChatRoute("m2", modelId: "gpt-b", client: c2),
@@ -200,7 +200,7 @@ public class RoutingChatClientTests
         using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("boom") };
         using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("primary", client: failing),
             new ChatRoute("backup", client: working),
@@ -218,7 +218,7 @@ public class RoutingChatClientTests
         using var failing1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("a") };
         using var failing2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("b") };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("m1", client: failing1),
             new ChatRoute("m2", client: failing2),
@@ -235,7 +235,7 @@ public class RoutingChatClientTests
         using var failing = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => ThrowingStream() };
         using var working = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("ok") };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("primary", client: failing),
             new ChatRoute("backup", client: working),
@@ -262,7 +262,7 @@ public class RoutingChatClientTests
             GetResponseAsyncCallback = (_, o, _) => { forwarded = o; return Task.FromResult(new ChatResponse()); },
         };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
             [new ChatRoute("m1", modelId: "gpt-x", reasoningEffort: ReasoningEffort.High, client: inner)]);
 
         _ = await client.GetResponseAsync([new(ChatRole.User, "hi")], options);
@@ -279,7 +279,7 @@ public class RoutingChatClientTests
     {
         using var inner = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("a", "b") };
 
-        using var client = new FailoverChatClient([new ChatRoute("m1", modelId: "x", client: inner)]);
+        using var client = new OrderedFailoverRouter([new ChatRoute("m1", modelId: "x", client: inner)]);
 
         var updates = new List<ChatResponseUpdate>();
         await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync([new(ChatRole.User, "hi")]))
@@ -489,7 +489,7 @@ public class RoutingChatClientTests
             GetResponseAsyncCallback = (_, _, _) => { secondCalled = true; return Task.FromResult(new ChatResponse()); },
         };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("primary", client: canceling),
             new ChatRoute("backup", client: backup),
@@ -509,7 +509,7 @@ public class RoutingChatClientTests
         using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("boom") };
         using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("primary", modelId: "p", providerName: "prov", client: failing),
             new ChatRoute("backup", modelId: "b", client: working),
@@ -537,7 +537,7 @@ public class RoutingChatClientTests
         using var failing1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("a") };
         using var failing2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("b") };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("m1", client: failing1),
             new ChatRoute("m2", client: failing2),
@@ -560,7 +560,7 @@ public class RoutingChatClientTests
         var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
         using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
 
-        using var client = new FailoverChatClient([new ChatRoute("only", client: working)]);
+        using var client = new OrderedFailoverRouter([new ChatRoute("only", client: working)]);
 
         using var capture = new AttemptEventCapture();
         using (capture.StartTurn())
@@ -579,7 +579,7 @@ public class RoutingChatClientTests
         using var failing = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => ThrowingStream() };
         using var working = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("ok") };
 
-        using var client = new FailoverChatClient(
+        using var client = new OrderedFailoverRouter(
         [
             new ChatRoute("primary", client: failing),
             new ChatRoute("backup", client: working),
@@ -608,7 +608,7 @@ public class RoutingChatClientTests
         var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
         using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
 
-        using var client = new FailoverChatClient([new ChatRoute("only", client: working)]);
+        using var client = new OrderedFailoverRouter([new ChatRoute("only", client: working)]);
 
         // No ActivityListener subscribed: the router does no telemetry work and the call still succeeds.
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
@@ -620,7 +620,7 @@ public class RoutingChatClientTests
     {
         using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))) };
 
-        using var client = new FailoverChatClient([new ChatRoute("m", modelId: "prov/m", client: inner)]);
+        using var client = new OrderedFailoverRouter([new ChatRoute("m", modelId: "prov/m", client: inner)]);
 
         using var capture = new AttemptEventCapture();
         using (capture.StartTurn())
@@ -639,7 +639,7 @@ public class RoutingChatClientTests
         var shared = new CountingDisposeClient();
         var other = new CountingDisposeClient();
 
-        var client = new FailoverChatClient(
+        var client = new OrderedFailoverRouter(
         [
             new ChatRoute("a", client: shared),
             new ChatRoute("b", client: shared),
@@ -692,9 +692,9 @@ public class RoutingChatClientTests
         var leafResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
         using var leafClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(leafResponse) };
 
-        using var inner = new FailoverChatClient(
+        using var inner = new OrderedFailoverRouter(
             [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
-        using var outer = new FailoverChatClient(
+        using var outer = new OrderedFailoverRouter(
             [new ChatRoute("Complexity", client: inner)]);
 
         ChatResponse response = await outer.GetResponseAsync([new(ChatRole.User, "hi")]);
@@ -711,9 +711,9 @@ public class RoutingChatClientTests
     public async Task Nesting_Streaming_LeafWinsIdentity_AndPathAccumulates()
     {
         using var leafClient = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("ok") };
-        using var inner = new FailoverChatClient(
+        using var inner = new OrderedFailoverRouter(
             [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
-        using var outer = new FailoverChatClient(
+        using var outer = new OrderedFailoverRouter(
             [new ChatRoute("Complexity", client: inner)]);
 
         ChatResponseUpdate? first = null;
@@ -734,9 +734,9 @@ public class RoutingChatClientTests
     {
         var leafResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
         using var leafClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(leafResponse) };
-        using var inner = new FailoverChatClient(
+        using var inner = new OrderedFailoverRouter(
             [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
-        using var outer = new FailoverChatClient(
+        using var outer = new OrderedFailoverRouter(
             [new ChatRoute("Complexity", client: inner)]);
 
         using var capture = new RoutingSpanCapture();
@@ -860,6 +860,63 @@ public class RoutingChatClientTests
             Exception? lastException,
             CancellationToken cancellationToken) =>
             new(_select(messages, options, routes, attempted, lastException));
+    }
+
+    // A RoutingChatClient that implements ordered-failover selection: honor an explicit ModelId, otherwise the
+    // first registered route, then each remaining route in registration order on failure. This is the canonical
+    // ~15-line sample policy (the same one the docs show for "try routes in order until one works"); the tests
+    // use it as a realistic subclass to exercise the base dispatch mechanism — dispatch, forwarding, fallback,
+    // telemetry, stamping, nesting, and disposal.
+    private sealed class OrderedFailoverRouter : RoutingChatClient
+    {
+        public OrderedFailoverRouter(IReadOnlyList<ChatRoute> routes)
+            : base(routes)
+        {
+        }
+
+        protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options,
+            IReadOnlyList<ChatRoute> routes,
+            IReadOnlyList<ChatRoute> attempted,
+            Exception? lastException,
+            CancellationToken cancellationToken)
+        {
+            // Initial selection: honor an explicit ModelId, otherwise the first registered route.
+            if (attempted.Count == 0)
+            {
+                return new(SelectInitialRoute(routes, options?.ModelId));
+            }
+
+            // Fallback: the next registered route not yet attempted, in registration order.
+            foreach (ChatRoute route in routes)
+            {
+                if (!attempted.Contains(route))
+                {
+                    return new(route);
+                }
+            }
+
+            // Every route attempted: stop and let the base rethrow the last exception.
+            return new((ChatRoute?)null);
+        }
+
+        private static ChatRoute SelectInitialRoute(IReadOnlyList<ChatRoute> routes, string? modelId)
+        {
+            if (!string.IsNullOrEmpty(modelId))
+            {
+                foreach (ChatRoute route in routes)
+                {
+                    if (string.Equals(route.ModelId, modelId, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(route.Name, modelId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return route;
+                    }
+                }
+            }
+
+            return routes[0];
+        }
     }
 
     private sealed class CountingDisposeClient : IChatClient

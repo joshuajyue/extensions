@@ -5,16 +5,17 @@ that owns several candidate routes and forwards each request to one of them. It 
 class**: it owns the routing *mechanism* — holding the candidates, dispatching, walking fallbacks, and
 recording telemetry — and defers the routing *policy* to a single method you override.
 
-There are only two types to learn:
+There is only one type to learn:
 
 - **`RoutingChatClient`** (abstract) — the mechanism. Override one method,
   [`SelectNextRouteAsync`](#write-a-policy-derive-from-routingchatclient), to decide which route to try
-  next.
-- **`FailoverChatClient`** (sealed) — the one built-in policy. It tries routes in order until one
-  succeeds, honoring an explicitly requested model first.
+  next. Selection, filtering, and failover are all expressed through that single method.
 
-This article describes the two types, how to construct a router, how to write a policy, and how to
-observe routing decisions. For scenario-driven samples, see the
+The simplest useful policy — ordered failover, which tries routes in turn until one succeeds — is just a
+few lines in a subclass, shown in [Get started](#get-started-ordered-failover-in-a-few-lines) below.
+
+This article describes the type, how to construct a router, how to write a policy, and how to observe
+routing decisions. For scenario-driven samples, see the
 [RoutingChatClient cookbook](./routing-chat-client-cookbook.md).
 
 > [!IMPORTANT]
@@ -31,7 +32,7 @@ All routing types live in the `Microsoft.Extensions.AI` namespace, so a single
 | Package | Contents |
 |---|---|
 | `Microsoft.Extensions.AI.Abstractions` | The route metadata types: `ChatRoute`, `ChatRouteCatalog`. |
-| `Microsoft.Extensions.AI` | The mechanism and built-in policy: `RoutingChatClient`, `FailoverChatClient`. |
+| `Microsoft.Extensions.AI` | The routing mechanism: `RoutingChatClient`. |
 
 ## How routing works
 
@@ -68,18 +69,52 @@ Because `RoutingChatClient` is itself an `IChatClient`, and each route is bound 
 routing pipeline forms a tree: a route's `Client` can be another `RoutingChatClient`. Route coarsely at
 the top (for example, by region or tenant) and finely below (for example, by cost).
 
-## Get started with `FailoverChatClient`
+## Get started: ordered failover in a few lines
 
-`FailoverChatClient` is the built-in, opinion-free policy. Give it routes in fallback order; it tries
-each in turn until one succeeds.
+The most common policy — try each route in turn until one succeeds, honoring an explicitly requested
+model first — is a short `RoutingChatClient` subclass. Copy this `OrderedFailoverClient` as-is, or use it
+as the template for your own policy:
 
 ```csharp
 using Microsoft.Extensions.AI;
 
+public sealed class OrderedFailoverClient : RoutingChatClient
+{
+    public OrderedFailoverClient(IReadOnlyList<ChatRoute> routes) : base(routes) { }
+
+    protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+        IEnumerable<ChatMessage> messages,
+        ChatOptions? options,
+        IReadOnlyList<ChatRoute> routes,
+        IReadOnlyList<ChatRoute> attempted,
+        Exception? lastException,
+        CancellationToken cancellationToken)
+    {
+        // First call: honor a pinned ModelId (matched by ModelId or Name), else the first route.
+        if (attempted.Count == 0)
+        {
+            ChatRoute? pinned = options?.ModelId is { } id
+                ? routes.FirstOrDefault(r =>
+                    string.Equals(r.ModelId, id, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(r.Name, id, StringComparison.OrdinalIgnoreCase))
+                : null;
+
+            return new(pinned ?? routes[0]);
+        }
+
+        // Later calls: the next registered route not yet attempted; null when the chain is exhausted.
+        return new(routes.Except(attempted).FirstOrDefault());
+    }
+}
+```
+
+Give it routes in fallback order; it tries each in turn until one succeeds:
+
+```csharp
 IChatClient primary = CreatePrimaryClient();
 IChatClient backup = CreateBackupClient();
 
-IChatClient router = new FailoverChatClient(
+IChatClient router = new OrderedFailoverClient(
 [
     new ChatRoute("primary", client: primary),
     new ChatRoute("backup", client: backup),
@@ -99,7 +134,7 @@ Its selection is deterministic:
 
 ```csharp
 // Pin a specific route by model id (or by route name).
-var response = await router.GetResponseAsync(
+var pinned = await router.GetResponseAsync(
     "Summarize this PDF.",
     new ChatOptions { ModelId = "gpt-4o-mini" });
 ```
@@ -158,7 +193,7 @@ var catalog = new ChatRouteCatalog(
         inputTokenCostPerMillion: 1, outputTokenCostPerMillion: 3),
 ]);
 
-IChatClient router = new FailoverChatClient(
+IChatClient router = new OrderedFailoverClient(
 [
     catalog.Get("openai:gpt-5.3").WithClient(gpt53Client),
     catalog.Get("openai:gpt-4o-mini").WithClient(gpt4oMiniClient),
@@ -171,7 +206,8 @@ the caller, because catalog formats and provenance requirements differ. The
 
 ## Write a policy: derive from `RoutingChatClient`
 
-For anything beyond ordered failover, derive from `RoutingChatClient` and override `SelectNextRouteAsync`:
+Ordered failover ([above](#get-started-ordered-failover-in-a-few-lines)) is itself a `RoutingChatClient`
+subclass. Any policy follows the same shape — override `SelectNextRouteAsync`:
 
 ```csharp
 protected abstract ValueTask<ChatRoute?> SelectNextRouteAsync(

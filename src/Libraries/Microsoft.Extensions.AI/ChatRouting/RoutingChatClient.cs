@@ -45,8 +45,12 @@ namespace Microsoft.Extensions.AI;
 /// client may have its own middleware, or may itself be another <see cref="RoutingChatClient"/>.
 /// </para>
 /// <para>
-/// Use <see cref="FailoverChatClient"/> for the built-in, opinion-free policy: honor an explicit
-/// <see cref="ChatOptions.ModelId"/> else the first route, then each remaining route in order on failure.
+/// The simplest policy is ordered failover — honor an explicit <see cref="ChatOptions.ModelId"/> else the first
+/// route, then each remaining route in registration order on failure — which a subclass expresses in a handful of
+/// lines: on the first call (<c>attempted</c> empty) return the pinned-or-first route; on a later call return the
+/// first route not in <c>attempted</c>, or <see langword="null"/> when none remain. Richer policies — complexity-
+/// or cost-aware selection, health-based candidate filtering, provider-aware failure pruning — fall out of the
+/// same method by reading the request, the route metadata, or <c>lastException</c>.
 /// </para>
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]

@@ -478,20 +478,6 @@
       ]
     },
     {
-      "Type": "sealed class Microsoft.Extensions.AI.FailoverChatClient : Microsoft.Extensions.AI.RoutingChatClient",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.FailoverChatClient.FailoverChatClient(System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "override System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoute?> Microsoft.Extensions.AI.FailoverChatClient.SelectNextRouteAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> attempted, System.Exception? lastException, System.Threading.CancellationToken cancellationToken);",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
       "Type": "class Microsoft.Extensions.AI.FunctionInvocationContext",
       "Stage": "Stable",
       "Methods": [
