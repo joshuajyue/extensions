@@ -11,12 +11,10 @@ There is only one type to learn:
   [`SelectNextRouteAsync`](#write-a-policy-derive-from-routingchatclient), to decide which route to try
   next. Selection, filtering, and failover are all expressed through that single method.
 
-The simplest useful policy — ordered failover, which tries routes in turn until one succeeds — is just a
-few lines in a subclass, shown in [Get started](#get-started-ordered-failover-in-a-few-lines) below.
-
-This article describes the type, how to construct a router, how to write a policy, and how to observe
-routing decisions. For scenario-driven samples, see the
-[RoutingChatClient cookbook](./routing-chat-client-cookbook.md).
+Your routing *policy* — route by difficulty, by meaning, by cost, by health, or plain ordered failover —
+is whatever you write in that method. The [cookbook](./routing-chat-client-cookbook.md) has a catalog of
+ready-to-copy policies; this article describes the type, how to construct a router, how to write a policy,
+and how to observe routing decisions.
 
 > [!IMPORTANT]
 > The routing types are experimental. Every public type is annotated with
@@ -31,7 +29,7 @@ All routing types live in the `Microsoft.Extensions.AI` namespace, so a single
 
 | Package | Contents |
 |---|---|
-| `Microsoft.Extensions.AI.Abstractions` | The route metadata types: `ChatRoute`, `ChatRouteCatalog`. |
+| `Microsoft.Extensions.AI.Abstractions` | The route metadata type: `ChatRoute`. |
 | `Microsoft.Extensions.AI` | The routing mechanism: `RoutingChatClient`. |
 
 ## How routing works
@@ -69,18 +67,19 @@ Because `RoutingChatClient` is itself an `IChatClient`, and each route is bound 
 routing pipeline forms a tree: a route's `Client` can be another `RoutingChatClient`. Route coarsely at
 the top (for example, by region or tenant) and finely below (for example, by cost).
 
-## Get started: ordered failover in a few lines
+## Get started: your first policy
 
-The most common policy — try each route in turn until one succeeds, honoring an explicitly requested
-model first — is a short `RoutingChatClient` subclass. Copy this `OrderedFailoverClient` as-is, or use it
-as the template for your own policy:
+A policy is a `RoutingChatClient` subclass that overrides `SelectNextRouteAsync`. Here is a minimal one
+that routes short prompts to a small model and everything else to a large one, then falls back to any
+remaining route if the first choice fails — three routing behaviors (selection, filtering, failover) in
+one method:
 
 ```csharp
 using Microsoft.Extensions.AI;
 
-public sealed class OrderedFailoverClient : RoutingChatClient
+public sealed class BySizeRouter : RoutingChatClient
 {
-    public OrderedFailoverClient(IReadOnlyList<ChatRoute> routes) : base(routes) { }
+    public BySizeRouter(IReadOnlyList<ChatRoute> routes) : base(routes) { }
 
     protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
         IEnumerable<ChatMessage> messages,
@@ -90,56 +89,35 @@ public sealed class OrderedFailoverClient : RoutingChatClient
         Exception? lastException,
         CancellationToken cancellationToken)
     {
-        // First call: honor a pinned ModelId (matched by ModelId or Name), else the first route.
         if (attempted.Count == 0)
         {
-            ChatRoute? pinned = options?.ModelId is { } id
-                ? routes.FirstOrDefault(r =>
-                    string.Equals(r.ModelId, id, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(r.Name, id, StringComparison.OrdinalIgnoreCase))
-                : null;
-
-            return new(pinned ?? routes[0]);
+            // First call: pick a route by a property of the request.
+            bool small = messages.Sum(m => m.Text.Length) < 280;
+            return new(routes.First(r => r.Name == (small ? "small" : "large")));
         }
 
-        // Later calls: the next registered route not yet attempted; null when the chain is exhausted.
+        // Later call: the previous route failed — try the next one not yet attempted.
         return new(routes.Except(attempted).FirstOrDefault());
     }
 }
 ```
 
-Give it routes in fallback order; it tries each in turn until one succeeds:
+Wire it up by binding each route to an `IChatClient`:
 
 ```csharp
-IChatClient primary = CreatePrimaryClient();
-IChatClient backup = CreateBackupClient();
-
-IChatClient router = new OrderedFailoverClient(
+IChatClient router = new BySizeRouter(
 [
-    new ChatRoute("primary", client: primary),
-    new ChatRoute("backup", client: backup),
+    new ChatRoute("small", modelId: "gpt-4o-mini", client: openaiMini),
+    new ChatRoute("large", modelId: "gpt-4o",      client: openai),
 ]);
 
-// Dispatches to "primary"; if it fails before producing output, falls back to "backup".
-ChatResponse response = await router.GetResponseAsync("Hello!");
+ChatResponse response = await router.GetResponseAsync("Hello!"); // short → "small"
 ```
 
-Its selection is deterministic:
-
-- **Initial route** — if the request pins a `ChatOptions.ModelId` that matches a route's `ModelId` or
-  `Name` (case-insensitively), that route is chosen; otherwise the first registered route.
-- **Fallback** — after a route fails before committing output, the next registered route not yet
-  attempted, in registration order. When every route has been attempted, the last exception is
-  rethrown.
-
-```csharp
-// Pin a specific route by model id (or by route name).
-var pinned = await router.GetResponseAsync(
-    "Summarize this PDF.",
-    new ChatOptions { ModelId = "gpt-4o-mini" });
-```
-
-## Define routes with `ChatRoute`
+That is the whole pattern. Real policies differ only in the body of `SelectNextRouteAsync`: a difficulty
+classifier, an embedding router, a cooldown gate, or plain ordered failover. The
+[cookbook](./routing-chat-client-cookbook.md) has each as a complete, copy-ready sample; the rest of this
+article covers the pieces the example above uses.
 
 A `ChatRoute` is the unit a router chooses between. It carries a required `Name` (a stable, router-local
 alias) and optional, advisory metadata. The mechanism reads only route identity to dispatch and forward
@@ -178,25 +156,27 @@ new ChatRoute(
     });
 ```
 
-### Reuse metadata with `ChatRouteCatalog`
+### Reuse metadata with `WithClient`
 
-`ChatRouteCatalog` stores reusable, client-less `ChatRoute` metadata that you bind to a client later.
-Look up an entry with `Get` (or `TryGet`) and attach a client with `WithClient` or the catalog's
-`CreateRoute`. This separates the *catalog* of known models from the *wiring* of a specific router.
+Build client-less `ChatRoute` metadata once (for example, a shared table of known models) and bind each
+entry to a client where you wire up a router. `WithClient` returns a copy of the route with the same
+metadata and the specified client, so the *catalog* of known models stays separate from the *wiring* of a
+specific router:
 
 ```csharp
-var catalog = new ChatRouteCatalog(
+ChatRoute[] catalog =
 [
     new ChatRoute("openai:gpt-5.3", providerName: "openai", modelId: "gpt-5.3",
         inputTokenCostPerMillion: 10, outputTokenCostPerMillion: 30),
     new ChatRoute("openai:gpt-4o-mini", providerName: "openai", modelId: "gpt-4o-mini",
         inputTokenCostPerMillion: 1, outputTokenCostPerMillion: 3),
-]);
+];
 
-IChatClient router = new OrderedFailoverClient(
+// Bind entries to a router — for example the cheapest-first policy defined below:
+IChatClient router = new CheapestRouteClient(
 [
-    catalog.Get("openai:gpt-5.3").WithClient(gpt53Client),
-    catalog.Get("openai:gpt-4o-mini").WithClient(gpt4oMiniClient),
+    catalog[0].WithClient(gpt53Client),
+    catalog[1].WithClient(gpt4oMiniClient),
 ]);
 ```
 
@@ -206,8 +186,8 @@ the caller, because catalog formats and provenance requirements differ. The
 
 ## Write a policy: derive from `RoutingChatClient`
 
-Ordered failover ([above](#get-started-ordered-failover-in-a-few-lines)) is itself a `RoutingChatClient`
-subclass. Any policy follows the same shape — override `SelectNextRouteAsync`:
+The [first-policy example](#get-started-your-first-policy) above is a `RoutingChatClient` subclass. Every
+policy follows the same shape — override `SelectNextRouteAsync`:
 
 ```csharp
 protected abstract ValueTask<ChatRoute?> SelectNextRouteAsync(
@@ -266,6 +246,10 @@ returning it. The [cookbook](./routing-chat-client-cookbook.md) works through th
 
 The base class exposes the registered routes to subclasses through the `protected Routes` property, so a
 policy that keeps its own per-route state (health, cooldowns) can enumerate them at construction.
+
+For complete, copy-ready policies — difficulty tiering, embedding similarity, sticky sessions, cooldown,
+circuit breaker, ordered failover, and cheapest-that-fits — see the
+[cookbook](./routing-chat-client-cookbook.md) and its [sample subclasses](./samples/routing/).
 
 ## Observe routing decisions
 
@@ -326,4 +310,5 @@ to them in code.
 ## Related content
 
 - [RoutingChatClient cookbook](./routing-chat-client-cookbook.md)
+- [Sample routing policies](./samples/routing/)
 - [`IChatClient`](https://learn.microsoft.com/dotnet/api/microsoft.extensions.ai.ichatclient)

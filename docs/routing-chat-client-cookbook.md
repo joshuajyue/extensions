@@ -13,74 +13,166 @@ Everything is in the `Microsoft.Extensions.AI` namespace.
 
 | Package | Types |
 |---|---|
-| `Microsoft.Extensions.AI.Abstractions` | `ChatRoute`, `ChatRouteCatalog` |
+| `Microsoft.Extensions.AI.Abstractions` | `ChatRoute` |
 | `Microsoft.Extensions.AI` | `RoutingChatClient` (abstract) |
 
-## The 30-second model
+## The one seam
 
-There is **one policy seam**: `RoutingChatClient.SelectNextRouteAsync`. The base class calls it in a
-loop and asks the same question each time — *given the request and what has been attempted (and why the
-last attempt failed), which route next, or `null` to stop?*
+Routing has a single extension point: `RoutingChatClient.SelectNextRouteAsync`. You **derive from
+`RoutingChatClient`** and override that one method; the base class owns everything else — dispatch,
+fallback, telemetry, response stamping, and disposal. The base calls your method in a loop and asks the
+same question each time — *given the request and what has been attempted (and why the last attempt
+failed), which route next, or `null` to stop?*
 
 - **Selection** = the first call (`attempted` empty, `lastException` null).
 - **Failover** = a later call (`lastException` set, `attempted[^1]` is the route that failed).
 - **Filtering** = simply not returning a route.
 
-Rules the base class enforces: the returned route must be one of the registered instances (by
-reference); a route already in `attempted` stops the loop; `null` on the first call throws, `null` after
-a failure rethrows the last exception; cancellation never triggers fallback; when streaming, fallback
-stops once the first token is on the wire.
+That is the whole model: *selection, filtering, and failover are the same method.* A difficulty
+classifier, an embedding router, a cooldown gate, and ordered failover are all just different bodies for
+`SelectNextRouteAsync`.
 
-You **derive from `RoutingChatClient`** and override the one method. The simplest policy — ordered
-failover (try each route until one succeeds) — is the short subclass shown in section 1; richer policies
-follow the same shape.
+Rules the base class enforces:
+
+- The returned route must be one of the registered instances, **matched by reference** — a reconstructed
+  `ChatRoute` with identical metadata makes the router throw. Resolve by name against `routes`:
+  ```csharp
+  ChatRoute pick = routes.First(r =>
+      string.Equals(r.Name, wanted, StringComparison.OrdinalIgnoreCase));
+  ```
+- A route already in `attempted` stops the loop (so routing always terminates).
+- `null` on the first call throws; `null` after a failure rethrows the last exception.
+- Cancellation never triggers fallback.
+- When streaming, fallback stops once the first token is on the wire.
+
+## The samples
+
+Each recipe below links to a complete, copy-ready policy in
+[samples/routing/](./samples/routing/). Grab the file, drop it in your project, and adapt it.
+
+| Policy | Sample | Recipe |
+|---|---|---|
+| Route by difficulty (rule-based, no model call) | [ComplexityRoutingClient.cs](./samples/routing/ComplexityRoutingClient.cs) | [Route by difficulty](#route-by-difficulty) |
+| Route by meaning (embedding similarity) | [SemanticRoutingClient.cs](./samples/routing/SemanticRoutingClient.cs) | [Route by meaning](#route-by-meaning) |
+| Sticky conversations | [StickyRoutingClient.cs](./samples/routing/StickyRoutingClient.cs) | [Sticky sessions](#sticky-sessions) |
+| Skip rate-limited routes | [CooldownRoutingClient.cs](./samples/routing/CooldownRoutingClient.cs) | [Cooldown](#cooldown) |
+| Trip a route after repeated failures | [CircuitBreakerRoutingClient.cs](./samples/routing/CircuitBreakerRoutingClient.cs) | [Circuit breaker](#circuit-breaker) |
+| Try routes in order until one works | [OrderedFailoverClient.cs](./samples/routing/OrderedFailoverClient.cs) | [Ordered failover](#ordered-failover) |
+| Cheapest route that fits | [CheapestRouteClient.cs](./samples/routing/CheapestRouteClient.cs) | [Cheapest that fits](#cheapest-that-fits) |
 
 ---
 
-## 1. Ordered failover
+## Route by difficulty
 
-The most common policy. It honors an explicitly requested model first, otherwise the first route, then
-falls back through the remaining routes in registration order. It's a short `RoutingChatClient` subclass
-— copy it as-is or use it as a template:
+Classify each request into a difficulty tier with fast, deterministic keyword/pattern scoring (no extra
+model call), then send it to the model you mapped to that tier — cheap models for small talk, a reasoning
+model for hard problems. On the first call the policy classifies and picks one route; on later calls it
+falls back through the rest.
+
+Full sample: [ComplexityRoutingClient.cs](./samples/routing/ComplexityRoutingClient.cs).
 
 ```csharp
-using Microsoft.Extensions.AI;
-
-public sealed class OrderedFailoverClient : RoutingChatClient
-{
-    public OrderedFailoverClient(IReadOnlyList<ChatRoute> routes) : base(routes) { }
-
-    protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
-        IEnumerable<ChatMessage> messages,
-        ChatOptions? options,
-        IReadOnlyList<ChatRoute> routes,
-        IReadOnlyList<ChatRoute> attempted,
-        Exception? lastException,
-        CancellationToken cancellationToken)
+IChatClient router = new ComplexityRoutingClient(
+    routes:
+    [
+        new ChatRoute("small",     modelId: "gpt-4o-mini",   client: openaiMini),
+        new ChatRoute("large",     modelId: "gpt-4o",        client: openai),
+        new ChatRoute("reasoning", modelId: "o3",            client: openaiReasoning),
+    ],
+    routeByTier: new Dictionary<ComplexityTier, string>
     {
-        if (attempted.Count == 0)
-        {
-            ChatRoute? pinned = options?.ModelId is { } id
-                ? routes.FirstOrDefault(r =>
-                    string.Equals(r.ModelId, id, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(r.Name, id, StringComparison.OrdinalIgnoreCase))
-                : null;
+        [ComplexityTier.Simple]    = "small",
+        [ComplexityTier.Medium]    = "small",
+        [ComplexityTier.Complex]   = "large",
+        [ComplexityTier.Reasoning] = "reasoning",
+    },
+    defaultRoute: "large");
 
-            return new(pinned ?? routes[0]);
-        }
-
-        return new(routes.Except(attempted).FirstOrDefault());
-    }
-}
+var quick = await router.GetResponseAsync("hi there");                        // → small
+var hard  = await router.GetResponseAsync("Refactor this service step by step to remove the lock."); // → reasoning
 ```
 
-Bind each route to its `IChatClient` and list them in fallback order:
+The classifier is a pure function you can call directly (`ComplexityRoutingClient.Classify(messages)`),
+so it is easy to unit-test the tiering independently of any client.
+
+---
+
+## Route by meaning
+
+Describe each route with a handful of representative "utterances", then route each request to the route
+whose utterances are semantically closest to the user's message. This is the semantic-router approach
+(what LiteLLM's "auto router" delegates to): embed the query, cosine-compare it against every route's
+utterances, and pick the best route that clears a similarity threshold — otherwise a default route.
+
+Full sample: [SemanticRoutingClient.cs](./samples/routing/SemanticRoutingClient.cs).
 
 ```csharp
-IChatClient anthropic = CreateAnthropicClient();
-IChatClient gemini    = CreateGeminiClient();
-IChatClient openai    = CreateOpenAIClient();
+IEmbeddingGenerator<string, Embedding<float>> embeddings = CreateEmbeddingGenerator();
 
+IChatClient router = new SemanticRoutingClient(
+    routes:
+    [
+        new ChatRoute("code",    client: codeModel),
+        new ChatRoute("support", client: supportModel),
+        new ChatRoute("general", client: generalModel),
+    ],
+    embeddings,
+    routeProfiles: new Dictionary<string, IReadOnlyList<string>>
+    {
+        ["code"]    = ["write a function", "fix this stack trace", "refactor this class"],
+        ["support"] = ["reset my password", "cancel my subscription", "I was double charged"],
+        ["general"] = ["what's the weather", "tell me a joke", "who won the game"],
+    },
+    defaultRoute: "general");
+
+var r = await router.GetResponseAsync("my deployment throws a NullReferenceException"); // → code
+```
+
+Profiles are embedded once and cached. Wrap the injected generator with caching to also amortize the
+per-request query embedding.
+
+---
+
+## Sticky sessions
+
+Keep a multi-turn conversation on the model that started it, without hard-coding which model that is.
+Stickiness is an application concern, so the policy holds no state: it calls back into your app for the
+route names a request is pinned to, and defers to an inner policy when nothing is pinned. Key pins on an
+**app-owned stable session id** — not `ChatOptions.ConversationId`, which some providers rotate per
+message.
+
+Full sample: [StickyRoutingClient.cs](./samples/routing/StickyRoutingClient.cs).
+
+```csharp
+// Your app decides what a request is pinned to (e.g. from a session store).
+ConcurrentDictionary<string, string> pinnedRouteBySession = new();
+
+IChatClient router = new StickyRoutingClient(
+    routes,
+    getPins: (messages, options) =>
+        options?.ConversationId is { } sessionKey &&           // your stable key, not the provider's
+        pinnedRouteBySession.TryGetValue(sessionKey, out string? route)
+            ? [route]
+            : null,
+    inner: (messages, options, routes, attempted, ex, ct) =>   // first turn: choose + remember
+        new(routes.Except(attempted).FirstOrDefault()));
+```
+
+A pin that no longer resolves to a registered route is skipped, so a stale pin can never dead-end a
+request; it simply re-attaches once the route exists again.
+
+---
+
+## Resilience
+
+### Ordered failover
+
+The simplest useful policy: try routes in order until one succeeds, honoring an explicitly requested model
+first. It's a dozen lines — the canonical starting point you copy and specialize.
+
+Full sample: [OrderedFailoverClient.cs](./samples/routing/OrderedFailoverClient.cs).
+
+```csharp
 IChatClient router = new OrderedFailoverClient(
 [
     new ChatRoute("claude-sonnet", providerName: "anthropic", modelId: "claude-sonnet-4", client: anthropic),
@@ -88,20 +180,16 @@ IChatClient router = new OrderedFailoverClient(
     new ChatRoute("gpt-mini",      providerName: "openai",     modelId: "gpt-4o-mini",      client: openai),
 ]);
 
-// No pin → first route (claude-sonnet); if it fails before output, fall back in order.
+// No pin → first route; if it fails before output, fall back in order.
 var a = await router.GetResponseAsync("Summarize this PDF.");
 
-// Pin a route by model id (or by route name).
-var b = await router.GetResponseAsync(
-    "Summarize this PDF.",
-    new ChatOptions { ModelId = "gemini-2.5-flash" });
+// Pin a route by model id (or route name).
+var b = await router.GetResponseAsync("Summarize this PDF.", new ChatOptions { ModelId = "gemini-2.5-flash" });
 ```
 
-Because each candidate is itself an `IChatClient`, you can give any one of them its own middleware
-(for example, wrap `openai` in `.AsBuilder().UseFunctionInvocation().Build()` before binding it), and you
-can wrap the whole router the same way.
-
-### Register in DI
+Because each candidate is itself an `IChatClient`, you can give any one of them its own middleware (for
+example wrap `openai` in `.AsBuilder().UseFunctionInvocation().Build()` before binding it), and wrap the
+whole router the same way. In DI:
 
 ```csharp
 services.AddChatClient(sp => new OrderedFailoverClient(
@@ -111,125 +199,81 @@ services.AddChatClient(sp => new OrderedFailoverClient(
 ]));
 ```
 
----
+### Cooldown
 
-## 2. Writing a policy: derive from `RoutingChatClient`
+Put a route on a timed cooldown when it rate-limits, and skip it while it cools — filtering *is* just not
+returning a route. On failure the policy reads a `Retry-After` header off the exception and records a
+cool-until time for the route that failed. Because the router is a DI singleton, that state persists
+across requests; cooldowns self-expire, so no success signal is needed to reinstate a route.
 
-Override `SelectNextRouteAsync`. Everything else — dispatch, fallback, telemetry, disposal — is the base
-class's job.
-
-### The one hard rule: reference identity
-
-Every route you return **must be one of the exact `routes` instances**. The router matches by reference,
-not by value — a reconstructed `ChatRoute` with identical metadata makes the router throw. Resolve by
-name against `routes`:
+Full sample: [CooldownRoutingClient.cs](./samples/routing/CooldownRoutingClient.cs).
 
 ```csharp
-ChatRoute pick = routes.First(r =>
-    string.Equals(r.Name, wanted, StringComparison.OrdinalIgnoreCase));
+IChatClient router = new CooldownRoutingClient(
+[
+    new ChatRoute("primary", client: primary),
+    new ChatRoute("backup",  client: backup),
+]);
 ```
 
-### Cheapest-that-fits (reads advisory metadata)
+### Circuit breaker
 
-This reads the `ChatRoute` cost and context-window hints that ordered failover ignores, and returns
-the cheapest route not yet tried — so the loop forms a cost-ordered fallback chain.
+Stop hammering a route that keeps failing: after a threshold of consecutive failures its circuit opens and
+the route is skipped for a reset window, then allowed a single half-open trial. The routing seam only
+observes failures, so this breaker resets on a timer. To close the instant a route recovers, wrap each
+route's client (or the whole router) in a `DelegatingChatClient` that clears the route's failure count on a
+successful response.
 
-```csharp
-public sealed class CheapestRouteClient : RoutingChatClient
-{
-    public CheapestRouteClient(IReadOnlyList<ChatRoute> routes) : base(routes) { }
+Full sample: [CircuitBreakerRoutingClient.cs](./samples/routing/CircuitBreakerRoutingClient.cs).
 
-    protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
-        IEnumerable<ChatMessage> messages,
-        ChatOptions? options,
-        IReadOnlyList<ChatRoute> routes,
-        IReadOnlyList<ChatRoute> attempted,
-        Exception? lastException,
-        CancellationToken cancellationToken)
-    {
-        int approxTokens = messages.Sum(m => m.Text.Length) / 4;
+### Prune a provider on an auth error
 
-        ChatRoute? next = routes
-            .Except(attempted)
-            .Where(r => r.MaxInputTokens is null || r.MaxInputTokens >= approxTokens) // context-window filter
-            .OrderBy(r => r.InputTokenCostPerMillion ?? decimal.MaxValue)             // cheapest first
-            .FirstOrDefault();
-
-        return new ValueTask<ChatRoute?>(next);
-    }
-}
-```
-
-### Classify once, then fall back
-
-A policy that classifies the request (difficulty, intent) picks **one** route on the first call, then
-falls back through the rest on later calls. Selection and failover are the same method — branch on
-`lastException`:
-
-```csharp
-protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
-    IEnumerable<ChatMessage> messages, ChatOptions? options,
-    IReadOnlyList<ChatRoute> routes, IReadOnlyList<ChatRoute> attempted,
-    Exception? lastException, CancellationToken cancellationToken)
-{
-    if (lastException is null)
-    {
-        // First call: classify and pick one route.
-        ChatRoute chosen = IsHard(messages) ? Named(routes, "smart") : Named(routes, "fast");
-        return new ValueTask<ChatRoute?>(chosen);
-    }
-
-    // Later calls: fall back to the next untried route in order.
-    return new ValueTask<ChatRoute?>(routes.Except(attempted).FirstOrDefault());
-}
-```
-
-### Blast-radius pruning on an auth error
-
-Interpret `lastException` and prune whole providers. On a 401 there's no point trying other routes that
+Interpret `lastException` and drop whole providers. On a 401 there's no point trying other routes that
 share the dead credential — just don't return them:
 
 ```csharp
 if (lastException is ClientResultException { Status: 401 or 403 })
 {
     ChatRoute dead = attempted[^1];
-    return new ValueTask<ChatRoute?>(routes
+    return new(routes
         .Except(attempted)
         .Where(r => !string.Equals(r.ProviderName, dead.ProviderName, StringComparison.OrdinalIgnoreCase))
         .FirstOrDefault());
 }
 ```
 
-### Filtering: skip an unhealthy route
+---
 
-There is no separate candidate filter — filtering *is* not returning a route. Keep your own health/
-cooldown state (seeded from the `protected Routes` property) and skip cooled routes:
+## Cheapest that fits
+
+Read the advisory `ChatRoute` cost and context-window hints and return the cheapest route whose window
+admits the prompt. Because selection and fallback are the same method, this forms a cost-ordered fallback
+chain automatically.
+
+Full sample: [CheapestRouteClient.cs](./samples/routing/CheapestRouteClient.cs).
 
 ```csharp
 ChatRoute? next = routes
     .Except(attempted)
-    .FirstOrDefault(r => !_cooldown.IsCooling(r.Name));
-
-// next may be null → the router stops (first call throws; after a failure it rethrows).
+    .Where(r => r.MaxInputTokens is null || r.MaxInputTokens >= approxTokens) // context-window filter
+    .OrderBy(r => r.InputTokenCostPerMillion ?? decimal.MaxValue)             // cheapest first
+    .FirstOrDefault();
 ```
-
-To *write* a cooldown when a route fails, inspect `lastException` on the next call — for example, read a
-`Retry-After` header off a `ClientResultException` and record a cool-until time for `attempted[^1]`
-before choosing the next route.
 
 ---
 
-## 3. Ingesting a model catalog (e.g. LiteLLM)
+## Reuse model metadata
 
-Map an external catalog into `ChatRoute` metadata, store it in a `ChatRouteCatalog`, then bind clients
-per route. Catalog parsing is the caller's job; here is a compact LiteLLM-style loader.
+Build client-less `ChatRoute` metadata once — for example by mapping an external catalog (LiteLLM, GitHub
+Models, provider feeds) — then bind each entry to a client where you wire up a router with `WithClient`.
+Catalog parsing is the caller's job; here is a compact LiteLLM-style loader.
 
 ```csharp
 using System.Text.Json;
 
-static ChatRouteCatalog LoadLiteLlm(JsonDocument doc)
+static IReadOnlyDictionary<string, ChatRoute> LoadLiteLlm(JsonDocument doc)
 {
-    var routes = new List<ChatRoute>();
+    var routes = new Dictionary<string, ChatRoute>(StringComparer.OrdinalIgnoreCase);
     foreach (JsonProperty model in doc.RootElement.EnumerateObject())
     {
         if (model.Name == "sample_spec")
@@ -238,7 +282,7 @@ static ChatRouteCatalog LoadLiteLlm(JsonDocument doc)
         }
 
         JsonElement v = model.Value;
-        routes.Add(new ChatRoute(
+        routes[model.Name] = new ChatRoute(
             name: model.Name,
             providerName: v.TryGetProperty("litellm_provider", out var p) ? p.GetString() : null,
             modelId: model.Name,
@@ -247,25 +291,31 @@ static ChatRouteCatalog LoadLiteLlm(JsonDocument doc)
                 ? ic.GetDecimal() * 1_000_000 : null,
             outputTokenCostPerMillion: v.TryGetProperty("output_cost_per_token", out var oc)
                 ? oc.GetDecimal() * 1_000_000 : null,
-            sourceUri: new Uri("https://github.com/BerriAI/litellm")));
+            sourceUri: new Uri("https://github.com/BerriAI/litellm"));
     }
 
-    return new ChatRouteCatalog(routes);
+    return routes;
 }
 
 // Bind the entries you want to a router:
-ChatRouteCatalog catalog = LoadLiteLlm(JsonDocument.Parse(json));
+IReadOnlyDictionary<string, ChatRoute> catalog = LoadLiteLlm(JsonDocument.Parse(json));
 
-IChatClient router = new OrderedFailoverClient(
-[
-    catalog.Get("gpt-4o-mini").WithClient(openai),
-    catalog.Get("claude-3-5-sonnet").WithClient(anthropic),
-]);
+IChatClient router = new ComplexityRoutingClient(
+    routes:
+    [
+        catalog["gpt-4o-mini"].WithClient(openaiMini),
+        catalog["gpt-4o"].WithClient(openai),
+    ],
+    routeByTier: new Dictionary<ComplexityTier, string>
+    {
+        [ComplexityTier.Simple] = "gpt-4o-mini",
+        [ComplexityTier.Complex] = "gpt-4o",
+    });
 ```
 
 ---
 
-## 4. More archetypes
+## Composition
 
 ### Nested routers (a routing tree)
 
@@ -309,13 +359,15 @@ For the full trace-event schema (`routing.decision`, `routing.attempt`), see
 
 | I want to… | Reach for |
 |---|---|
-| Try routes **in order until one works** | an ordered-failover `RoutingChatClient` subclass (section 1) |
+| Route by **difficulty** | [ComplexityRoutingClient.cs](./samples/routing/ComplexityRoutingClient.cs) |
+| Route by **meaning** | [SemanticRoutingClient.cs](./samples/routing/SemanticRoutingClient.cs) |
+| Keep a conversation **sticky** to one model | [StickyRoutingClient.cs](./samples/routing/StickyRoutingClient.cs) |
+| **Skip** a rate-limited route until it cools | [CooldownRoutingClient.cs](./samples/routing/CooldownRoutingClient.cs) |
+| **Trip** a route after repeated failures | [CircuitBreakerRoutingClient.cs](./samples/routing/CircuitBreakerRoutingClient.cs) |
+| Try routes **in order until one works** | [OrderedFailoverClient.cs](./samples/routing/OrderedFailoverClient.cs) |
+| **Cheapest that fits** | [CheapestRouteClient.cs](./samples/routing/CheapestRouteClient.cs) |
 | **Pin** a request to a specific model/route | `ChatOptions.ModelId` (read in your `SelectNextRouteAsync`) |
-| Route across **different providers/clients** | routes bound via `client:` / `WithClient` |
-| **Cheapest that fits** | a `RoutingChatClient` subclass reading `ChatRoute` cost/context metadata |
-| **Fall back** after a failure | later `SelectNextRouteAsync` calls (branch on `lastException`) |
 | **Prune a provider** on an auth error | interpret `lastException`, don't return that provider's routes |
-| **Skip** a rate-limited/unhealthy route | don't return it (keep your own cooldown state) |
-| Route by **difficulty / meaning** | a `RoutingChatClient` subclass that classifies on the first call |
+| Route across **different providers/clients** | routes bound via `client:` / `WithClient` |
 | **Nested** region/tenant → model routing | a route whose `Client` is another `RoutingChatClient` |
-| Reuse **model metadata** | `ChatRouteCatalog` (+ your JSON loader) bound with `WithClient` |
+| Reuse **model metadata** | client-less `ChatRoute` entries (+ your JSON loader) bound with `WithClient` |

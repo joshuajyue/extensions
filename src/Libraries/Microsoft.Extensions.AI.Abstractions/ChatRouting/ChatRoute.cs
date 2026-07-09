@@ -14,8 +14,8 @@ namespace Microsoft.Extensions.AI;
 /// application-defined properties) and is bound to an <see cref="IChatClient"/> when used at runtime. Because the client
 /// may itself be another <c>RoutingChatClient</c>, a route is a node in a routing tree, not necessarily a
 /// concrete provider model — which is why it is a <em>route</em> rather than a "model". Metadata-only
-/// instances (with no <see cref="Client"/>) can be stored in a <see cref="ChatRouteCatalog"/> and bound to a
-/// concrete client later. The metadata is advisory: the routing mechanism never interprets it, and only a
+/// instances (with no <see cref="Client"/>) can be created up front and bound to a concrete client later with
+/// <see cref="WithClient"/>. The metadata is advisory: the routing mechanism never interprets it, and only a
 /// <c>RoutingChatClient</c> subclass's selection policy decides how to use it. A basic ordered-failover policy
 /// ignores the cost, context-window, and latency hints entirely — cost- or context-aware routing is
 /// bring-your-own: derive from <c>RoutingChatClient</c> and read these properties (and any

@@ -1484,34 +1484,6 @@
       ]
     },
     {
-      "Type": "class Microsoft.Extensions.AI.ChatRouteCatalog",
-      "Stage": "Experimental",
-      "Methods": [
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRouteCatalog.ChatRouteCatalog(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatRoute> entries);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.ChatRouteCatalog.CreateRoute(string name, Microsoft.Extensions.AI.IChatClient client);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "Microsoft.Extensions.AI.ChatRoute Microsoft.Extensions.AI.ChatRouteCatalog.Get(string name);",
-          "Stage": "Experimental"
-        },
-        {
-          "Member": "bool Microsoft.Extensions.AI.ChatRouteCatalog.TryGet(string name, out Microsoft.Extensions.AI.ChatRoute? entry);",
-          "Stage": "Experimental"
-        }
-      ],
-      "Properties": [
-        {
-          "Member": "System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> Microsoft.Extensions.AI.ChatRouteCatalog.Entries { get; }",
-          "Stage": "Experimental"
-        }
-      ]
-    },
-    {
       "Type": "class Microsoft.Extensions.AI.ChatToolMode",
       "Stage": "Stable",
       "Methods": [

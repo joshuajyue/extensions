@@ -228,7 +228,7 @@ public abstract class RoutingChatClient : IChatClient
 
             try
             {
-                ChatResponse response = await route.Client!.GetResponseAsync(messages, RouteForwarding.Apply(route, options), cancellationToken);
+                ChatResponse response = await route.Client!.GetResponseAsync(messages, ForwardOptions(route, options), cancellationToken);
                 RecordAttemptEvent(attempt, route, AttemptOutcomeSuccess, startTimestamp, error: null);
                 StampResponse(response, route);
                 return response;
@@ -277,7 +277,7 @@ public abstract class RoutingChatClient : IChatClient
             long startTimestamp = Stopwatch.GetTimestamp();
 
             IAsyncEnumerator<ChatResponseUpdate> enumerator =
-                route.Client!.GetStreamingResponseAsync(messages, RouteForwarding.Apply(route, options), cancellationToken).GetAsyncEnumerator(cancellationToken);
+                route.Client!.GetStreamingResponseAsync(messages, ForwardOptions(route, options), cancellationToken).GetAsyncEnumerator(cancellationToken);
 
             bool hasFirst;
             try
@@ -446,6 +446,34 @@ public abstract class RoutingChatClient : IChatClient
 
     private static IEnumerable<ChatMessage> NormalizeMessages(IEnumerable<ChatMessage> messages) =>
         messages as IReadOnlyList<ChatMessage> ?? messages.ToArray();
+
+    // The one place the router shapes a chosen route's request before forwarding it to the route's bound client.
+    // Forwards the caller's options on a clone (never mutating the caller's instance), supplying the chosen route's
+    // advisory ModelId and ReasoningEffort — but only where the caller did not already pin them, so an explicit
+    // request always wins over a route default. When the route adds nothing (no such metadata, or the caller pinned
+    // everything), the caller's options are forwarded as-is with no allocation.
+    private static ChatOptions? ForwardOptions(ChatRoute route, ChatOptions? options)
+    {
+        bool needsModelId = route.ModelId is not null && options?.ModelId is null;
+        bool needsEffort = route.ReasoningEffort is not null && options?.Reasoning?.Effort is null;
+        if (!needsModelId && !needsEffort)
+        {
+            return options;
+        }
+
+        ChatOptions forwarded = options?.Clone() ?? new ChatOptions();
+        if (needsModelId)
+        {
+            forwarded.ModelId = route.ModelId;
+        }
+
+        if (needsEffort)
+        {
+            (forwarded.Reasoning ??= new ReasoningOptions()).Effort = route.ReasoningEffort;
+        }
+
+        return forwarded;
+    }
 
     private static void StampResponse(ChatResponse response, ChatRoute route)
     {
