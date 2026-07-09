@@ -12,6 +12,7 @@ routing types they use are experimental (`[Experimental("MEAI001")]`), so each f
 |---|---|---|
 | [ComplexityRoutingClient.cs](./ComplexityRoutingClient.cs) | Rule-based complexity tiering (no model call) | Route by difficulty |
 | [SemanticRoutingClient.cs](./SemanticRoutingClient.cs) | Embedding similarity against per-route utterances | Route by meaning |
+| [CapabilityGatingClient.cs](./CapabilityGatingClient.cs) | Require tools / vision / structured output the request needs | Require a capability |
 | [StickyRoutingClient.cs](./StickyRoutingClient.cs) | App-owned conversation pinning over an inner policy | Sticky sessions |
 | [CooldownRoutingClient.cs](./CooldownRoutingClient.cs) | Skip rate-limited routes until they cool | Cooldown |
 | [CircuitBreakerRoutingClient.cs](./CircuitBreakerRoutingClient.cs) | Open a route's circuit after repeated failures | Circuit breaker |

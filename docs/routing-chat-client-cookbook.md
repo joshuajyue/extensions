@@ -54,6 +54,7 @@ Each recipe below links to a complete, copy-ready policy in
 |---|---|---|
 | Route by difficulty (rule-based, no model call) | [ComplexityRoutingClient.cs](./samples/routing/ComplexityRoutingClient.cs) | [Route by difficulty](#route-by-difficulty) |
 | Route by meaning (embedding similarity) | [SemanticRoutingClient.cs](./samples/routing/SemanticRoutingClient.cs) | [Route by meaning](#route-by-meaning) |
+| Require a capability (tools / vision / JSON) | [CapabilityGatingClient.cs](./samples/routing/CapabilityGatingClient.cs) | [Require a capability](#require-a-capability) |
 | Sticky conversations | [StickyRoutingClient.cs](./samples/routing/StickyRoutingClient.cs) | [Sticky sessions](#sticky-sessions) |
 | Skip rate-limited routes | [CooldownRoutingClient.cs](./samples/routing/CooldownRoutingClient.cs) | [Cooldown](#cooldown) |
 | Trip a route after repeated failures | [CircuitBreakerRoutingClient.cs](./samples/routing/CircuitBreakerRoutingClient.cs) | [Circuit breaker](#circuit-breaker) |
@@ -130,6 +131,44 @@ var r = await router.GetResponseAsync("my deployment throws a NullReferenceExcep
 
 Profiles are embedded once and cached. Wrap the injected generator with caching to also amortize the
 per-request query embedding.
+
+---
+
+## Require a capability
+
+The difficulty and meaning policies express a *preference*; capability gating expresses a *requirement*. A
+request that carries a tool, an image, or a JSON-schema response format must never reach a route that can't
+serve it. This policy reads what each request actually needs and returns the first unattempted route that
+advertises all of it — so it doubles as a correctness filter and a capability-aware fallback chain.
+
+Each route advertises what it supports through a `ModelCapabilities` flags value stored in
+`ChatRoute.AdditionalProperties` (the "capability tokens an application's own candidate filter reads" that
+`ChatRoute` is designed to carry). If no capable route remains, the base class throws or rethrows rather
+than silently downgrading to an incapable model.
+
+Full sample: [CapabilityGatingClient.cs](./samples/routing/CapabilityGatingClient.cs).
+
+```csharp
+IChatClient router = new CapabilityGatingClient(
+[
+    new ChatRoute("mini",  modelId: "gpt-4o-mini", client: openaiMini,
+        additionalProperties: new() { ["capabilities"] = ModelCapabilities.ToolCalling }),
+    new ChatRoute("omni",  modelId: "gpt-4o",      client: openai,
+        additionalProperties: new() { ["capabilities"] =
+            ModelCapabilities.ToolCalling | ModelCapabilities.Vision | ModelCapabilities.StructuredOutput }),
+]);
+
+// A plain chat can be served by either route → "mini".
+var text = await router.GetResponseAsync("summarize this thread");
+
+// An image-bearing request requires Vision → only "omni" qualifies.
+var vision = await router.GetResponseAsync(
+    new ChatMessage(ChatRole.User, [new TextContent("what's in this picture?"), new UriContent(imageUri, "image/png")]));
+```
+
+The requirement derivation is a pure function you can call directly
+(`CapabilityGatingClient.RequiredCapabilities(messages, options)`), so it is easy to unit-test what a given
+request demands independently of any client.
 
 ---
 
@@ -361,6 +400,7 @@ For the full trace-event schema (`routing.decision`, `routing.attempt`), see
 |---|---|
 | Route by **difficulty** | [ComplexityRoutingClient.cs](./samples/routing/ComplexityRoutingClient.cs) |
 | Route by **meaning** | [SemanticRoutingClient.cs](./samples/routing/SemanticRoutingClient.cs) |
+| Require a **capability** (tools/vision/JSON) | [CapabilityGatingClient.cs](./samples/routing/CapabilityGatingClient.cs) |
 | Keep a conversation **sticky** to one model | [StickyRoutingClient.cs](./samples/routing/StickyRoutingClient.cs) |
 | **Skip** a rate-limited route until it cools | [CooldownRoutingClient.cs](./samples/routing/CooldownRoutingClient.cs) |
 | **Trip** a route after repeated failures | [CircuitBreakerRoutingClient.cs](./samples/routing/CircuitBreakerRoutingClient.cs) |
