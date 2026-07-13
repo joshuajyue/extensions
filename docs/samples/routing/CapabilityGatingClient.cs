@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 
 namespace Microsoft.Extensions.AI.Samples.Routing;
 
-/// <summary>Capabilities a route can advertise, and a request can require.</summary>
+/// <summary>Capabilities policy configuration can assign to a route, and a request can require.</summary>
 [Flags]
 public enum ModelCapabilities
 {
@@ -31,22 +31,24 @@ public enum ModelCapabilities
 
 /// <summary>
 /// A hard capability gate: it inspects each request for the features it actually needs — tools, image
-/// input, structured output — and returns the first unattempted route that advertises all of them. Unlike
+/// input, structured output — and returns the first unattempted route configured for all of them. Unlike
 /// the cost or difficulty policies, capability is a <em>correctness</em> filter, not a preference: a request
-/// carrying a tool must never reach a route that cannot call tools. Each route advertises what it supports
-/// through a <see cref="ModelCapabilities"/> value stored in <see cref="ChatRoute.AdditionalProperties"/>
-/// under <see cref="CapabilitiesKey"/> (the "capability tokens an application's own candidate filter reads"
-/// that <see cref="ChatRoute"/> is designed to carry). Because selection and fallback are the same method,
-/// a failure simply advances to the next capable route.
+/// carrying a tool must never reach a route that cannot call tools. Capabilities are application policy,
+/// so the caller supplies typed configuration keyed by <see cref="ChatRoute.Name"/> rather than storing it
+/// on the route. Because selection and fallback are the same method, a failure simply advances to the next
+/// capable route.
 /// </summary>
 public sealed class CapabilityGatingClient : RoutingChatClient
 {
-    /// <summary>The <see cref="ChatRoute.AdditionalProperties"/> key under which a route advertises its <see cref="ModelCapabilities"/>.</summary>
-    public const string CapabilitiesKey = "capabilities";
+    private readonly IReadOnlyDictionary<string, ModelCapabilities> _capabilitiesByRouteName;
 
-    public CapabilityGatingClient(IReadOnlyList<ChatRoute> routes)
+    public CapabilityGatingClient(
+        IReadOnlyList<ChatRoute> routes,
+        IReadOnlyDictionary<string, ModelCapabilities> capabilitiesByRouteName)
         : base(routes)
     {
+        _capabilitiesByRouteName = capabilitiesByRouteName ??
+            throw new ArgumentNullException(nameof(capabilitiesByRouteName));
     }
 
     protected override ValueTask<ChatRoute?> SelectRouteAsync(
@@ -61,7 +63,7 @@ public sealed class CapabilityGatingClient : RoutingChatClient
 
         ChatRoute? next = routes
             .Except(attempted)
-            .FirstOrDefault(r => Supports(r, required));
+            .FirstOrDefault(route => Supports(route.Name, required));
 
         // next is null when no capable route remains: the base class throws on the first call, or rethrows
         // the last exception on a fallback call. That is the correct outcome — silently sending a request to
@@ -115,13 +117,13 @@ public sealed class CapabilityGatingClient : RoutingChatClient
         return false;
     }
 
-    // A route satisfies the request when it advertises every required capability (superset). A route with no
-    // declared capabilities is treated as text-only, so it qualifies only for requests that require nothing.
-    private static bool Supports(ChatRoute route, ModelCapabilities required)
+    // A route satisfies the request when its configured capabilities include every required capability
+    // (superset). A route with no configuration is treated as text-only.
+    private bool Supports(string routeName, ModelCapabilities required)
     {
         ModelCapabilities available =
-            route.AdditionalProperties?.TryGetValue(CapabilitiesKey, out ModelCapabilities caps) == true
-                ? caps
+            _capabilitiesByRouteName.TryGetValue(routeName, out ModelCapabilities capabilities)
+                ? capabilities
                 : ModelCapabilities.None;
 
         return (available & required) == required;

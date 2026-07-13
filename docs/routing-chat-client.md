@@ -5,8 +5,10 @@ that owns several candidate routes and forwards each request to one of them. It 
 class**: it owns the routing *mechanism* — holding the candidates, dispatching, and walking fallbacks —
 and defers the routing *policy* to a single method you override.
 
-There is only one type to learn:
+There are two types to learn:
 
+- **`ChatRoute`** — a sealed invocation target with a name, a required `IChatClient`, and optional request
+  defaults.
 - **`RoutingChatClient`** (abstract) — the mechanism. Override one method,
   [`SelectRouteAsync`](#write-a-policy-derive-from-routingchatclient), to decide which route to try
   next. Selection, filtering, and failover are all expressed through that single method.
@@ -24,13 +26,12 @@ and how to observe routing decisions.
 
 ## Packages and namespaces
 
-All routing types live in the `Microsoft.Extensions.AI` namespace, so a single
-`using Microsoft.Extensions.AI;` covers them. They ship in two packages:
+All routing types live in the `Microsoft.Extensions.AI` namespace and ship in the
+`Microsoft.Extensions.AI` package, so a single `using Microsoft.Extensions.AI;` covers them.
 
 | Package | Contents |
 |---|---|
-| `Microsoft.Extensions.AI.Abstractions` | The route metadata type: `ChatRoute`. |
-| `Microsoft.Extensions.AI` | The routing mechanism: `RoutingChatClient`. |
+| `Microsoft.Extensions.AI` | `ChatRoute` and the abstract `RoutingChatClient`. |
 
 ## How routing works
 
@@ -45,8 +46,10 @@ That question is `RoutingChatClient.SelectRouteAsync`. The base class calls it i
 1. **Select.** Call `SelectRouteAsync` with an empty `attempted` list and a `null` `lastException`.
    The returned route is dispatched. Returning `null` here throws `InvalidOperationException` (a router
    with nothing to route to).
-2. **Dispatch.** Forward the request to the route's `Client`. If it succeeds (or, when streaming,
-   produces its first update), the response is returned unchanged.
+2. **Dispatch.** If the selected route supplies a `ModelId` or `ReasoningEffort` that the caller omitted,
+   clone the request options (or create them) and fill those defaults. Forward the request to the route's
+   `Client`. If it succeeds (or, when streaming, produces its first update), the response is returned
+   unchanged.
 3. **Fall back.** If the dispatch fails *before* producing output, call `SelectRouteAsync` again —
    now with the failed route appended to `attempted` and the thrown exception as `lastException`. The
    returned route is dispatched next. Returning `null` here **rethrows the last exception**.
@@ -102,13 +105,13 @@ public sealed class BySizeRouter : RoutingChatClient
 }
 ```
 
-Wire it up by binding each route to an `IChatClient`:
+Wire it up by constructing each route with an `IChatClient`:
 
 ```csharp
 IChatClient router = new BySizeRouter(
 [
-    new ChatRoute("small", modelId: "gpt-4o-mini", client: openaiMini),
-    new ChatRoute("large", modelId: "gpt-4o",      client: openai),
+    new ChatRoute("small", openaiMini, modelId: "gpt-4o-mini"),
+    new ChatRoute("large", openai,     modelId: "gpt-4o"),
 ]);
 
 ChatResponse response = await router.GetResponseAsync("Hello!"); // short → "small"
@@ -119,70 +122,97 @@ classifier, an embedding router, a cooldown gate, or plain ordered failover. The
 [cookbook](./routing-chat-client-cookbook.md) has each as a complete, copy-ready sample; the rest of this
 article covers the pieces the example above uses.
 
-A `ChatRoute` is the unit a router chooses between. It carries a required `Name` (a stable, router-local
-alias) and optional, advisory metadata. The mechanism reads only `Client` to dispatch; your policy decides
-how to use the metadata.
+## Configure routes
+
+`ChatRoute` is the sealed, minimal invocation target a router chooses between:
+
+```csharp
+public ChatRoute(
+    string name,
+    IChatClient client,
+    string? modelId = null,
+    ReasoningEffort? reasoningEffort = null);
+```
+
+It exposes only four get-only properties:
 
 | Member | Type | Description |
 |---|---|---|
 | `Name` | `string` | Required. The route's stable identifier and routing alias. |
-| `ProviderName` | `string?` | The provider that serves the route (for example, `"openai"`). |
-| `ModelId` | `string?` | An advisory provider-specific model identifier. |
-| `ReasoningEffort` | `ReasoningEffort?` | An advisory reasoning-effort hint. |
-| `MaxInputTokens` | `int?` | A context-window hint. |
-| `InputTokenCostPerMillion` | `decimal?` | Input cost per million tokens. |
-| `OutputTokenCostPerMillion` | `decimal?` | Output cost per million tokens. |
-| `TypicalLatency` | `TimeSpan?` | A latency hint. |
-| `SourceUri` | `Uri?` | Provenance: where the metadata came from. |
-| `UpdatedAt` | `DateTimeOffset?` | Provenance: when the metadata was last refreshed. |
-| `AdditionalProperties` | `AdditionalPropertiesDictionary?` | An open bag for anything not first-class (for example, capability tokens or a quality score). |
-| `Client` | `IChatClient?` | The client that serves the route. Required to dispatch. |
+| `Client` | `IChatClient` | Required and non-null. The client invoked when the route is selected. |
+| `ModelId` | `string?` | A model-id request default applied at dispatch. |
+| `ReasoningEffort` | `ReasoningEffort?` | A reasoning-effort request default applied at dispatch. |
 
-The first-class surface is intentionally objective and small: provider and model identity, cost,
-context window, latency, and provenance. Subjective or custom dimensions — a quality score, benchmark
-results, region, or any provider-specific signal — go in `AdditionalProperties` under app-specific keys
-for your policy to read:
+When a selected route contributes a missing default, `RoutingChatClient` clones the caller's `ChatOptions`
+(or creates options when none were supplied) before applying it. Route `ModelId` fills
+`ChatOptions.ModelId`, and route `ReasoningEffort` fills `ChatOptions.Reasoning.Effort`. Caller values
+always win, and the caller's options instance is never mutated.
+
+This lets multiple logical routes share one physical client. Each route can carry different invocation
+defaults, and the router applies the selected route's values when it calls that shared client:
 
 ```csharp
-new ChatRoute(
-    name: "openai:gpt-5.3",
-    providerName: "openai",
-    modelId: "gpt-5.3",
-    additionalProperties: new AdditionalPropertiesDictionary
-    {
-        ["capabilities"] = new[] { "reasoning", "function_calling" },
-        ["quality"] = 0.95,
-        ["region"] = "us-east",
-    });
+IChatClient sharedOpenAIClient = CreateOpenAIClient();
+
+ChatRoute[] routes =
+[
+    new ChatRoute("fast", sharedOpenAIClient, modelId: "gpt-4o-mini"),
+    new ChatRoute(
+        "deep",
+        sharedOpenAIClient,
+        modelId: "o3",
+        reasoningEffort: ReasoningEffort.High),
+];
 ```
 
-### Reuse metadata with `WithClient`
+If the policy selects `fast`, the shared client receives `gpt-4o-mini`; if it selects `deep` (including as
+a fallback), the same client receives `o3` and high reasoning effort.
 
-Build client-less `ChatRoute` metadata once (for example, a shared table of known models) and bind each
-entry to a client where you wire up a router. `WithClient` returns a copy of the route with the same
-metadata and the specified client, so the *catalog* of known models stays separate from the *wiring* of a
-specific router:
+### Keep catalog and policy metadata in application types
+
+Cost, capability, context-window, latency, provenance, provider, and other catalog data belong to the
+application or routing policy, not to `ChatRoute`. Keep that data in a typed application record keyed by
+route name, then create the runtime route when clients are composed:
 
 ```csharp
-ChatRoute[] catalog =
+public sealed record ModelCatalogEntry(
+    string RouteName,
+    string Provider,
+    string ModelId,
+    ReasoningEffort? DefaultReasoningEffort,
+    int ContextWindowTokens,
+    decimal InputCostPerMillionTokens,
+    decimal OutputCostPerMillionTokens,
+    Uri MetadataSource,
+    DateTimeOffset MetadataRefreshedAt)
+{
+    public ChatRoute Bind(IChatClient client) =>
+        new(RouteName, client, ModelId, DefaultReasoningEffort);
+}
+
+ModelCatalogEntry[] catalog =
 [
-    new ChatRoute("openai:gpt-5.3", providerName: "openai", modelId: "gpt-5.3",
-        inputTokenCostPerMillion: 10, outputTokenCostPerMillion: 30),
-    new ChatRoute("openai:gpt-4o-mini", providerName: "openai", modelId: "gpt-4o-mini",
-        inputTokenCostPerMillion: 1, outputTokenCostPerMillion: 3),
+    new(
+        "openai:gpt-5.3", "openai", "gpt-5.3", ReasoningEffort.High,
+        128_000, 10, 30, new Uri("https://example.com/model-catalog"), DateTimeOffset.UtcNow),
+    new(
+        "openai:gpt-4o-mini", "openai", "gpt-4o-mini", null,
+        128_000, 1, 3, new Uri("https://example.com/model-catalog"), DateTimeOffset.UtcNow),
 ];
 
-// Bind entries to a router — for example the cheapest-first policy defined below:
-IChatClient router = new CheapestRouteClient(
-[
-    catalog[0].WithClient(gpt53Client),
-    catalog[1].WithClient(gpt4oMiniClient),
-]);
+// Composition creates required, client-bound invocation targets.
+ChatRoute[] runtimeRoutes = catalog
+    .Select(entry => entry.Bind(sharedOpenAIClient))
+    .ToArray();
+
+// Policies can retain the typed catalog, keyed by ChatRoute.Name.
+IReadOnlyDictionary<string, ModelCatalogEntry> policyMetadataByRouteName =
+    catalog.ToDictionary(entry => entry.RouteName, StringComparer.OrdinalIgnoreCase);
 ```
 
-Mapping an external catalog (LiteLLM, GitHub Models, provider feeds) into `ChatRoute` entries is left to
-the caller, because catalog formats and provenance requirements differ. The
-[cookbook](./routing-chat-client-cookbook.md) shows a worked LiteLLM loader.
+Mapping external catalogs (LiteLLM, GitHub Models, provider feeds) into application-owned records is left
+to the caller because formats and policy requirements differ. The
+[cookbook](./routing-chat-client-cookbook.md) shows a worked loader.
 
 ## Write a policy: derive from `RoutingChatClient`
 
@@ -202,7 +232,7 @@ protected abstract ValueTask<ChatRoute?> SelectRouteAsync(
 | Parameter | Meaning |
 |---|---|
 | `messages` | The request messages. |
-| `options` | The request options (including any caller-pinned `ModelId`). |
+| `options` | The caller's request options (including any pinned `ModelId`); route defaults are applied after selection. |
 | `routes` | All registered routes, in registration order. |
 | `attempted` | The routes already tried this request, in attempt order. Empty on the first call. |
 | `lastException` | The failure from the most recent attempt. `null` on the first call. |
@@ -212,12 +242,22 @@ Return the route to try next, or `null` to stop. The policy may retry an attempt
 outside `routes`; it owns those decisions and must eventually return `null` if attempts keep failing.
 `null` on the first call throws; `null` after a failure rethrows `lastException`.
 
-A minimal cheapest-first policy that reads the advisory metadata:
+A minimal cheapest-first policy reads typed, application-owned cost configuration keyed by route name:
 
 ```csharp
+public sealed record RouteCostConfiguration(
+    int? ContextWindowTokens,
+    decimal? InputCostPerMillionTokens);
+
 public sealed class CheapestRouteClient : RoutingChatClient
 {
-    public CheapestRouteClient(IReadOnlyList<ChatRoute> routes) : base(routes) { }
+    private readonly IReadOnlyDictionary<string, RouteCostConfiguration> _configurationByRouteName;
+
+    public CheapestRouteClient(
+        IReadOnlyList<ChatRoute> routes,
+        IReadOnlyDictionary<string, RouteCostConfiguration> configurationByRouteName)
+        : base(routes) =>
+        _configurationByRouteName = configurationByRouteName;
 
     protected override ValueTask<ChatRoute?> SelectRouteAsync(
         IEnumerable<ChatMessage> messages,
@@ -230,7 +270,9 @@ public sealed class CheapestRouteClient : RoutingChatClient
         // Cheapest route not yet attempted; null when the ranked chain is exhausted.
         ChatRoute? next = routes
             .Except(attempted)
-            .OrderBy(r => r.InputTokenCostPerMillion ?? decimal.MaxValue)
+            .OrderBy(route =>
+                _configurationByRouteName[route.Name].InputCostPerMillionTokens ??
+                decimal.MaxValue)
             .FirstOrDefault();
 
         return new ValueTask<ChatRoute?>(next);
@@ -240,8 +282,9 @@ public sealed class CheapestRouteClient : RoutingChatClient
 
 Because selection, filtering, and failover are the same method, richer policies fall out naturally:
 classify the request on the first call and pick one route; on later calls interpret `lastException` to
-prune a whole provider or return the cheapest remaining route; skip an unhealthy route by never
-returning it. The [cookbook](./routing-chat-client-cookbook.md) works through these archetypes.
+prune routes using an app-owned provider map or return the cheapest remaining route; skip an unhealthy
+route by never returning it. The [cookbook](./routing-chat-client-cookbook.md) works through these
+archetypes.
 
 The base class exposes the registered routes to subclasses through the `protected Routes` property, so a
 policy that keeps its own per-route state (health, cooldowns) can enumerate them at construction.
@@ -262,7 +305,7 @@ IChatClient instrumentedRouter = router
     .Build();
 ```
 
-To trace each attempted model independently, wrap each route's client before binding it to the route.
+To trace each attempted model independently, wrap each client before constructing its route.
 Those invocation spans naturally become children of the overall router span and capture failed primary
 attempts as well as the eventual successful fallback. RCC itself does not define a separate telemetry
 source or custom event schema, and it returns each selected client's response unchanged.

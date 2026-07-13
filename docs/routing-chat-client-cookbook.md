@@ -13,8 +13,7 @@ Everything is in the `Microsoft.Extensions.AI` namespace.
 
 | Package | Types |
 |---|---|
-| `Microsoft.Extensions.AI.Abstractions` | `ChatRoute` |
-| `Microsoft.Extensions.AI` | `RoutingChatClient` (abstract) |
+| `Microsoft.Extensions.AI` | Sealed `ChatRoute` invocation targets and the abstract `RoutingChatClient` |
 
 ## The one seam
 
@@ -41,6 +40,43 @@ Dispatch semantics:
 - `null` on the first call throws; `null` after a failure rethrows the last exception.
 - Cancellation never triggers fallback.
 - When streaming, fallback stops once the first token is on the wire.
+
+`ChatRoute` is deliberately minimal:
+
+```csharp
+public ChatRoute(
+    string name,
+    IChatClient client,
+    string? modelId = null,
+    ReasoningEffort? reasoningEffort = null);
+```
+
+Its only properties are `Name`, `Client`, `ModelId`, and `ReasoningEffort`. `Name` is the policy key,
+`Client` is required and non-null, and `ModelId` and `ReasoningEffort` are request defaults. When a route
+contributes a missing default, `RoutingChatClient` clones the caller's `ChatOptions` (creating options when
+needed) before filling `ChatOptions.ModelId` or `ChatOptions.Reasoning.Effort`. Caller values win and the
+original options are not mutated. Cost, context, capability, provider, provenance, and similar metadata
+belong to typed application or policy configuration keyed by route name.
+
+One client can therefore serve multiple logical routes. The selected route supplies different defaults to
+the same client:
+
+```csharp
+IChatClient sharedOpenAIClient = CreateOpenAIClient();
+
+ChatRoute[] routes =
+[
+    new ChatRoute("fast", sharedOpenAIClient, modelId: "gpt-4o-mini"),
+    new ChatRoute(
+        "deep",
+        sharedOpenAIClient,
+        modelId: "o3",
+        reasoningEffort: ReasoningEffort.High),
+];
+```
+
+Selecting `fast` sends `gpt-4o-mini` to the shared client. Selecting `deep`, including during fallback,
+sends `o3` with high reasoning effort to that same client.
 
 ## The samples
 
@@ -73,9 +109,13 @@ Full sample: [ComplexityRoutingClient.cs](./samples/routing/ComplexityRoutingCli
 IChatClient router = new ComplexityRoutingClient(
     routes:
     [
-        new ChatRoute("small",     modelId: "gpt-4o-mini",   client: openaiMini),
-        new ChatRoute("large",     modelId: "gpt-4o",        client: openai),
-        new ChatRoute("reasoning", modelId: "o3",            client: openaiReasoning),
+        new ChatRoute("small",     openaiMini,      modelId: "gpt-4o-mini"),
+        new ChatRoute("large",     openai,          modelId: "gpt-4o"),
+        new ChatRoute(
+            "reasoning",
+            openaiReasoning,
+            modelId: "o3",
+            reasoningEffort: ReasoningEffort.High),
     ],
     routeByTier: new Dictionary<ComplexityTier, string>
     {
@@ -110,9 +150,9 @@ IEmbeddingGenerator<string, Embedding<float>> embeddings = CreateEmbeddingGenera
 IChatClient router = new SemanticRoutingClient(
     routes:
     [
-        new ChatRoute("code",    client: codeModel),
-        new ChatRoute("support", client: supportModel),
-        new ChatRoute("general", client: generalModel),
+        new ChatRoute("code", codeModel),
+        new ChatRoute("support", supportModel),
+        new ChatRoute("general", generalModel),
     ],
     embeddings,
     routeProfiles: new Dictionary<string, IReadOnlyList<string>>
@@ -136,24 +176,29 @@ per-request query embedding.
 The difficulty and meaning policies express a *preference*; capability gating expresses a *requirement*. A
 request that carries a tool, an image, or a JSON-schema response format must never reach a route that can't
 serve it. This policy reads what each request actually needs and returns the first unattempted route that
-advertises all of it — so it doubles as a correctness filter and a capability-aware fallback chain.
+is configured to support all of it — so it doubles as a correctness filter and a capability-aware fallback
+chain.
 
-Each route advertises what it supports through a `ModelCapabilities` flags value stored in
-`ChatRoute.AdditionalProperties` (the "capability tokens an application's own candidate filter reads" that
-`ChatRoute` is designed to carry). If no capable route remains, the base class throws or rethrows rather
-than silently downgrading to an incapable model.
+Capabilities are policy-owned typed configuration keyed by route name. If no capable route remains, the
+base class throws or rethrows rather than silently downgrading to an incapable model.
 
 Full sample: [CapabilityGatingClient.cs](./samples/routing/CapabilityGatingClient.cs).
 
 ```csharp
 IChatClient router = new CapabilityGatingClient(
-[
-    new ChatRoute("mini",  modelId: "gpt-4o-mini", client: openaiMini,
-        additionalProperties: new() { ["capabilities"] = ModelCapabilities.ToolCalling }),
-    new ChatRoute("omni",  modelId: "gpt-4o",      client: openai,
-        additionalProperties: new() { ["capabilities"] =
-            ModelCapabilities.ToolCalling | ModelCapabilities.Vision | ModelCapabilities.StructuredOutput }),
-]);
+    routes:
+    [
+        new ChatRoute("mini", openaiMini, modelId: "gpt-4o-mini"),
+        new ChatRoute("omni", openai,     modelId: "gpt-4o"),
+    ],
+    capabilitiesByRouteName: new Dictionary<string, ModelCapabilities>
+    {
+        ["mini"] = ModelCapabilities.ToolCalling,
+        ["omni"] =
+            ModelCapabilities.ToolCalling |
+            ModelCapabilities.Vision |
+            ModelCapabilities.StructuredOutput,
+    });
 
 // A plain chat can be served by either route → "mini".
 var text = await router.GetResponseAsync("summarize this thread");
@@ -211,9 +256,9 @@ Full sample: [OrderedFailoverClient.cs](./samples/routing/OrderedFailoverClient.
 ```csharp
 IChatClient router = new OrderedFailoverClient(
 [
-    new ChatRoute("claude-sonnet", providerName: "anthropic", modelId: "claude-sonnet-4", client: anthropic),
-    new ChatRoute("gemini-flash",  providerName: "google",    modelId: "gemini-2.5-flash", client: gemini),
-    new ChatRoute("gpt-mini",      providerName: "openai",     modelId: "gpt-4o-mini",      client: openai),
+    new ChatRoute("claude-sonnet", anthropic, modelId: "claude-sonnet-4"),
+    new ChatRoute("gemini-flash",  gemini,    modelId: "gemini-2.5-flash"),
+    new ChatRoute("gpt-mini",      openai,    modelId: "gpt-4o-mini"),
 ]);
 
 // No pin → first route; if it fails before output, fall back in order.
@@ -223,15 +268,15 @@ var a = await router.GetResponseAsync("Summarize this PDF.");
 var b = await router.GetResponseAsync("Summarize this PDF.", new ChatOptions { ModelId = "gemini-2.5-flash" });
 ```
 
-Because each candidate is itself an `IChatClient`, you can give any one of them its own middleware (for
-example wrap `openai` in `.AsBuilder().UseFunctionInvocation().Build()` before binding it), and wrap the
-whole router the same way. In DI:
+Because each route has its own `IChatClient`, you can give any one of them its own middleware (for example,
+wrap `openai` in `.AsBuilder().UseFunctionInvocation().Build()` before constructing its route), and wrap
+the whole router the same way. In DI:
 
 ```csharp
 services.AddChatClient(sp => new OrderedFailoverClient(
 [
-    new ChatRoute("primary", client: sp.GetRequiredKeyedService<IChatClient>("primary")),
-    new ChatRoute("backup",  client: sp.GetRequiredKeyedService<IChatClient>("backup")),
+    new ChatRoute("primary", sp.GetRequiredKeyedService<IChatClient>("primary")),
+    new ChatRoute("backup",  sp.GetRequiredKeyedService<IChatClient>("backup")),
 ]));
 ```
 
@@ -247,8 +292,8 @@ Full sample: [CooldownRoutingClient.cs](./samples/routing/CooldownRoutingClient.
 ```csharp
 IChatClient router = new CooldownRoutingClient(
 [
-    new ChatRoute("primary", client: primary),
-    new ChatRoute("backup",  client: backup),
+    new ChatRoute("primary", primary),
+    new ChatRoute("backup", backup),
 ]);
 ```
 
@@ -265,15 +310,31 @@ Full sample: [CircuitBreakerRoutingClient.cs](./samples/routing/CircuitBreakerRo
 ### Prune a provider on an auth error
 
 Interpret `lastException` and drop whole providers. On a 401 there's no point trying other routes that
-share the dead credential — just don't return them:
+share the dead credential. Provider identity is application-owned policy configuration keyed by route
+name:
 
 ```csharp
+public sealed record RouteProviderConfiguration(string Provider);
+
+IReadOnlyDictionary<string, RouteProviderConfiguration> providersByRouteName =
+    new Dictionary<string, RouteProviderConfiguration>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["anthropic-primary"] = new("anthropic"),
+        ["anthropic-backup"] = new("anthropic"),
+        ["openai-backup"] = new("openai"),
+    };
+
 if (lastException is ClientResultException { Status: 401 or 403 })
 {
     ChatRoute dead = attempted[^1];
+    string deadProvider = providersByRouteName[dead.Name].Provider;
+
     return new(routes
         .Except(attempted)
-        .Where(r => !string.Equals(r.ProviderName, dead.ProviderName, StringComparison.OrdinalIgnoreCase))
+        .Where(route => !string.Equals(
+            providersByRouteName[route.Name].Provider,
+            deadProvider,
+            StringComparison.OrdinalIgnoreCase))
         .FirstOrDefault());
 }
 ```
@@ -282,17 +343,34 @@ if (lastException is ClientResultException { Status: 401 or 403 })
 
 ## Cheapest that fits
 
-Read the advisory `ChatRoute` cost and context-window hints and return the cheapest route whose window
-admits the prompt. Because selection and fallback are the same method, this forms a cost-ordered fallback
-chain automatically.
+Keep cost and context-window data in typed policy configuration keyed by route name, then return the
+cheapest route whose configured window admits the prompt. Because selection and fallback are the same
+method, this forms a cost-ordered fallback chain automatically.
 
 Full sample: [CheapestRouteClient.cs](./samples/routing/CheapestRouteClient.cs).
 
 ```csharp
+IChatClient router = new CheapestRouteClient(
+    routes:
+    [
+        new ChatRoute("mini", openai, modelId: "gpt-4o-mini"),
+        new ChatRoute("large", openai, modelId: "gpt-4o"),
+    ],
+    configurationByRouteName: new Dictionary<string, RouteCostConfiguration>
+    {
+        ["mini"] = new(ContextWindowTokens: 128_000, InputCostPerMillionTokens: 0.15m),
+        ["large"] = new(ContextWindowTokens: 128_000, InputCostPerMillionTokens: 2.50m),
+    });
+
 ChatRoute? next = routes
     .Except(attempted)
-    .Where(r => r.MaxInputTokens is null || r.MaxInputTokens >= approxTokens) // context-window filter
-    .OrderBy(r => r.InputTokenCostPerMillion ?? decimal.MaxValue)             // cheapest first
+    .Select(route => (Route: route, Configuration: _configurationByRouteName[route.Name]))
+    .Where(candidate =>
+        candidate.Configuration.ContextWindowTokens is null ||
+        candidate.Configuration.ContextWindowTokens >= approxTokens)
+    .OrderBy(candidate =>
+        candidate.Configuration.InputCostPerMillionTokens ?? decimal.MaxValue)
+    .Select(candidate => candidate.Route)
     .FirstOrDefault();
 ```
 
@@ -300,16 +378,30 @@ ChatRoute? next = routes
 
 ## Reuse model metadata
 
-Build client-less `ChatRoute` metadata once — for example by mapping an external catalog (LiteLLM, GitHub
-Models, provider feeds) — then bind each entry to a client where you wire up a router with `WithClient`.
-Catalog parsing is the caller's job; here is a compact LiteLLM-style loader.
+Map an external catalog (LiteLLM, GitHub Models, provider feeds) into an application-owned typed record.
+At composition time, bind each catalog entry to a required client to create the runtime `ChatRoute`.
+Catalog parsing and policy metadata remain the caller's job; here is a compact LiteLLM-style loader.
 
 ```csharp
 using System.Text.Json;
 
-static IReadOnlyDictionary<string, ChatRoute> LoadLiteLlm(JsonDocument doc)
+public sealed record ModelCatalogEntry(
+    string RouteName,
+    string? Provider,
+    string ModelId,
+    ReasoningEffort? DefaultReasoningEffort,
+    int? ContextWindowTokens,
+    decimal? InputCostPerMillionTokens,
+    decimal? OutputCostPerMillionTokens,
+    Uri MetadataSource)
 {
-    var routes = new Dictionary<string, ChatRoute>(StringComparer.OrdinalIgnoreCase);
+    public ChatRoute Bind(IChatClient client) =>
+        new(RouteName, client, ModelId, DefaultReasoningEffort);
+}
+
+static IReadOnlyDictionary<string, ModelCatalogEntry> LoadLiteLlm(JsonDocument doc)
+{
+    var catalog = new Dictionary<string, ModelCatalogEntry>(StringComparer.OrdinalIgnoreCase);
     foreach (JsonProperty model in doc.RootElement.EnumerateObject())
     {
         if (model.Name == "sample_spec")
@@ -318,30 +410,34 @@ static IReadOnlyDictionary<string, ChatRoute> LoadLiteLlm(JsonDocument doc)
         }
 
         JsonElement v = model.Value;
-        routes[model.Name] = new ChatRoute(
-            name: model.Name,
-            providerName: v.TryGetProperty("litellm_provider", out var p) ? p.GetString() : null,
-            modelId: model.Name,
-            maxInputTokens: v.TryGetProperty("max_input_tokens", out var mit) ? mit.GetInt32() : null,
-            inputTokenCostPerMillion: v.TryGetProperty("input_cost_per_token", out var ic)
+        catalog[model.Name] = new ModelCatalogEntry(
+            RouteName: model.Name,
+            Provider: v.TryGetProperty("litellm_provider", out var p) ? p.GetString() : null,
+            ModelId: model.Name,
+            DefaultReasoningEffort: null,
+            ContextWindowTokens: v.TryGetProperty("max_input_tokens", out var mit) ? mit.GetInt32() : null,
+            InputCostPerMillionTokens: v.TryGetProperty("input_cost_per_token", out var ic)
                 ? ic.GetDecimal() * 1_000_000 : null,
-            outputTokenCostPerMillion: v.TryGetProperty("output_cost_per_token", out var oc)
+            OutputCostPerMillionTokens: v.TryGetProperty("output_cost_per_token", out var oc)
                 ? oc.GetDecimal() * 1_000_000 : null,
-            sourceUri: new Uri("https://github.com/BerriAI/litellm"));
+            MetadataSource: new Uri("https://github.com/BerriAI/litellm"));
     }
 
-    return routes;
+    return catalog;
 }
 
-// Bind the entries you want to a router:
-IReadOnlyDictionary<string, ChatRoute> catalog = LoadLiteLlm(JsonDocument.Parse(json));
+IReadOnlyDictionary<string, ModelCatalogEntry> catalog =
+    LoadLiteLlm(JsonDocument.Parse(json));
+
+// Both logical models use the same client; Bind carries each model id into its runtime route.
+ChatRoute[] routes =
+[
+    catalog["gpt-4o-mini"].Bind(sharedOpenAIClient),
+    catalog["gpt-4o"].Bind(sharedOpenAIClient),
+];
 
 IChatClient router = new ComplexityRoutingClient(
-    routes:
-    [
-        catalog["gpt-4o-mini"].WithClient(openaiMini),
-        catalog["gpt-4o"].WithClient(openai),
-    ],
+    routes,
     routeByTier: new Dictionary<ComplexityTier, string>
     {
         [ComplexityTier.Simple] = "gpt-4o-mini",
@@ -363,8 +459,8 @@ IChatClient euRouter = new OrderedFailoverClient(euRoutes);
 
 IChatClient root = new RegionRouterClient(   // your RoutingChatClient subclass
 [
-    new ChatRoute("us", client: usRouter),
-    new ChatRoute("eu", client: euRouter),
+    new ChatRoute("us", usRouter),
+    new ChatRoute("eu", euRouter),
 ]);
 ```
 
@@ -388,7 +484,7 @@ to trace individual attempts. See [routing-chat-client.md](./routing-chat-client
 | Try routes **in order until one works** | [OrderedFailoverClient.cs](./samples/routing/OrderedFailoverClient.cs) |
 | **Cheapest that fits** | [CheapestRouteClient.cs](./samples/routing/CheapestRouteClient.cs) |
 | **Pin** a request to a specific model/route | `ChatOptions.ModelId` (read in your `SelectRouteAsync`) |
-| **Prune a provider** on an auth error | interpret `lastException`, don't return that provider's routes |
-| Route across **different providers/clients** | routes bound via `client:` / `WithClient` |
+| **Prune a provider** on an auth error | interpret `lastException` and consult an app-owned provider map |
+| Route across **different providers/clients** | construct each route with its required `IChatClient` |
 | **Nested** region/tenant → model routing | a route whose `Client` is another `RoutingChatClient` |
-| Reuse **model metadata** | client-less `ChatRoute` entries (+ your JSON loader) bound with `WithClient` |
+| Reuse **model metadata** | typed app-owned catalog entries with a method that creates a runtime `ChatRoute` |

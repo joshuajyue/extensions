@@ -12,20 +12,6 @@ namespace Microsoft.Extensions.AI;
 
 public class RoutingChatClientTests
 {
-    // The AdditionalProperties key a test route uses to declare capability tokens that a policy reads.
-    private const string CapabilitiesKey = "capabilities";
-
-    // Builds a route that declares the given capability tokens under CapabilitiesKey.
-    private static ChatRoute Capable(string name, IChatClient client, params string[] capabilities) =>
-        new(name, additionalProperties: new AdditionalPropertiesDictionary { [CapabilitiesKey] = capabilities }, client: client);
-
-    // Whether a route declares the given capability token under CapabilitiesKey.
-    private static bool Declares(ChatRoute route, string token) =>
-        route.AdditionalProperties is not null &&
-        route.AdditionalProperties.TryGetValue(CapabilitiesKey, out object? value) &&
-        value is IEnumerable<string> tokens &&
-        tokens.Contains(token, StringComparer.OrdinalIgnoreCase);
-
     // Whether any message carries image content.
     private static bool HasImage(IEnumerable<ChatMessage> messages) =>
         messages.Any(m => m.Contents.Any(c => c is DataContent d && d.HasTopLevelMediaType("image")));
@@ -41,9 +27,9 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public void Constructor_RejectsRouteWithoutClient()
+    public void ChatRoute_RejectsMissingClient()
     {
-        Assert.Throws<ArgumentException>(() => new OrderedFailoverRouter([new ChatRoute("m1")]));
+        Assert.Throws<ArgumentNullException>(() => new ChatRoute("m1", null!));
     }
 
     [Fact]
@@ -93,7 +79,7 @@ public class RoutingChatClientTests
         };
 
         using var client = new OrderedFailoverRouter(
-            [new ChatRoute("m1", providerName: "openai", modelId: "gpt-4o-mini", client: inner)]);
+            [new ChatRoute("m1", inner)]);
 
         ChatResponse response = await client.GetResponseAsync(messages, options, CancellationToken.None);
 
@@ -225,7 +211,7 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task Dispatch_DoesNotInterpretRouteMetadata()
+    public async Task Dispatch_AppliesRouteDefaultsWithoutMutatingCaller()
     {
         ChatOptions? forwarded = null;
         var options = new ChatOptions();
@@ -235,28 +221,101 @@ public class RoutingChatClientTests
         };
 
         using var client = new OrderedFailoverRouter(
-            [new ChatRoute("m1", modelId: "gpt-x", reasoningEffort: ReasoningEffort.High, client: inner)]);
+            [new ChatRoute("m1", inner, modelId: "gpt-x", reasoningEffort: ReasoningEffort.High)]);
 
         _ = await client.GetResponseAsync([new(ChatRole.User, "hi")], options);
 
-        Assert.Same(options, forwarded);
-        Assert.Null(forwarded!.ModelId);
+        Assert.NotSame(options, forwarded);
+        Assert.Equal("gpt-x", forwarded!.ModelId);
+        Assert.Equal(ReasoningEffort.High, forwarded.Reasoning!.Effort);
+        Assert.Null(options.ModelId);
         Assert.Null(options.Reasoning);
     }
 
     [Fact]
-    public async Task Streaming_PassesUpdatesThroughUnchanged()
+    public async Task Dispatch_PreservesExplicitCallerOptions()
     {
-        using var inner = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("a", "b") };
+        ChatOptions? forwarded = null;
+        var options = new ChatOptions
+        {
+            ModelId = "caller-model",
+            Reasoning = new ReasoningOptions { Effort = ReasoningEffort.Low },
+        };
+        using var inner = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, o, _) => { forwarded = o; return Task.FromResult(new ChatResponse()); },
+        };
 
-        using var client = new OrderedFailoverRouter([new ChatRoute("m1", modelId: "x", client: inner)]);
+        using var client = new OrderedFailoverRouter(
+            [new ChatRoute("m1", inner, modelId: "route-model", reasoningEffort: ReasoningEffort.High)]);
+
+        _ = await client.GetResponseAsync([new(ChatRole.User, "hi")], options);
+
+        Assert.Same(options, forwarded);
+        Assert.Equal("caller-model", forwarded!.ModelId);
+        Assert.Equal(ReasoningEffort.Low, forwarded.Reasoning!.Effort);
+    }
+
+    [Fact]
+    public async Task SharedClient_RoutesApplyDistinctDefaultsAcrossFallback()
+    {
+        var attempts = new List<(string? modelId, ReasoningEffort? effort)>();
+        using var shared = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, options, _) =>
+            {
+                attempts.Add((options?.ModelId, options?.Reasoning?.Effort));
+                return options?.ModelId == "model-a"
+                    ? throw new InvalidOperationException("model-a failed")
+                    : Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok")));
+            },
+        };
+
+        using var client = new OrderedFailoverRouter(
+        [
+            new ChatRoute("fast", shared, modelId: "model-a", reasoningEffort: ReasoningEffort.Low),
+            new ChatRoute("deep", shared, modelId: "model-b", reasoningEffort: ReasoningEffort.High),
+        ]);
+
+        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Equal("ok", response.Text);
+        Assert.Equal(
+        [
+            ("model-a", ReasoningEffort.Low),
+            ("model-b", ReasoningEffort.High),
+        ],
+        attempts);
+    }
+
+    [Fact]
+    public async Task Streaming_AppliesRouteDefaultsAndPassesUpdatesThroughUnchanged()
+    {
+        ChatOptions? forwarded = null;
+        var options = new ChatOptions();
+        using var inner = new TestChatClient
+        {
+            GetStreamingResponseAsyncCallback = (_, o, _) =>
+            {
+                forwarded = o;
+                return YieldUpdates("a", "b");
+            },
+        };
+
+        using var client = new OrderedFailoverRouter(
+            [new ChatRoute("m1", inner, modelId: "x", reasoningEffort: ReasoningEffort.Medium)]);
 
         var updates = new List<ChatResponseUpdate>();
-        await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync([new(ChatRole.User, "hi")]))
+        await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync([new(ChatRole.User, "hi")], options))
         {
             updates.Add(update);
         }
 
+        Assert.NotSame(options, forwarded);
+        Assert.Equal("x", forwarded!.ModelId);
+        Assert.Equal(ReasoningEffort.Medium, forwarded.Reasoning!.Effort);
+        Assert.Null(options.ModelId);
+        Assert.Null(options.Reasoning);
         Assert.Equal(2, updates.Count);
         Assert.Equal(["a", "b"], updates.Select(u => u.Text));
         Assert.All(updates, u => Assert.Null(u.AdditionalProperties));
@@ -287,14 +346,21 @@ public class RoutingChatClientTests
         var visionResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "vision"));
         using var plain = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(plainResponse) };
         using var vision = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(visionResponse) };
+        var capabilities = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["plain"] = [],
+            ["vision"] = ["vision"],
+        };
 
         // The policy narrows to vision-capable routes only when the request carries an image, then picks the
         // first eligible route not yet attempted — the new single-seam equivalent of the old canRoute filter.
         using var client = new DelegatingTestRouter(
-            [Capable("plain", plain), Capable("vision", vision, "vision")],
+            [new ChatRoute("plain", plain), new ChatRoute("vision", vision)],
             (messages, _, routes, attempted, _) =>
             {
-                IEnumerable<ChatRoute> eligible = HasImage(messages) ? routes.Where(r => Declares(r, "vision")) : routes;
+                IEnumerable<ChatRoute> eligible = HasImage(messages)
+                    ? routes.Where(r => capabilities[r.Name].Contains("vision", StringComparer.OrdinalIgnoreCase))
+                    : routes;
                 return eligible.FirstOrDefault(r => !attempted.Contains(r));
             });
 
@@ -311,12 +377,18 @@ public class RoutingChatClientTests
         using var openAiA = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("401 unauthorized") };
         using var openAiB = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "should-not-run"))) };
         using var anthropic = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
+        var providers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["openai-a"] = "openai",
+            ["openai-b"] = "openai",
+            ["anthropic"] = "anthropic",
+        };
 
         using var client = new DelegatingTestRouter(
         [
-            new ChatRoute("openai-a", providerName: "openai", client: openAiA),
-            new ChatRoute("openai-b", providerName: "openai", client: openAiB),
-            new ChatRoute("anthropic", providerName: "anthropic", client: anthropic),
+            new ChatRoute("openai-a", openAiA),
+            new ChatRoute("openai-b", openAiB),
+            new ChatRoute("anthropic", anthropic),
         ],
         (_, _, routes, attempted, lastException) =>
         {
@@ -330,7 +402,7 @@ public class RoutingChatClientTests
             bool authError = lastException!.Message.Contains("401");
             return routes.FirstOrDefault(r =>
                 !attempted.Contains(r) &&
-                !(authError && r.ProviderName == failed.ProviderName));
+                !(authError && providers[r.Name] == providers[failed.Name]));
         });
 
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
@@ -551,7 +623,7 @@ public class RoutingChatClientTests
         using var leafClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(leafResponse) };
 
         using var inner = new OrderedFailoverRouter(
-            [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
+            [new ChatRoute("gpt-4o-mini", leafClient, modelId: "openai/gpt-4o-mini")]);
         using var outer = new OrderedFailoverRouter(
             [new ChatRoute("Complexity", client: inner)]);
 
@@ -568,7 +640,7 @@ public class RoutingChatClientTests
     {
         using var leafClient = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("ok") };
         using var inner = new OrderedFailoverRouter(
-            [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
+            [new ChatRoute("gpt-4o-mini", leafClient, modelId: "openai/gpt-4o-mini")]);
         using var outer = new OrderedFailoverRouter(
             [new ChatRoute("Complexity", client: inner)]);
 

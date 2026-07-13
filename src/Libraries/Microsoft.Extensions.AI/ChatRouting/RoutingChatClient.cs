@@ -38,6 +38,11 @@ namespace Microsoft.Extensions.AI;
 /// only before the first update is produced; once a token is on the wire the router never re-routes.
 /// </para>
 /// <para>
+/// Before dispatch, the selected route's <see cref="ChatRoute.ModelId"/> and
+/// <see cref="ChatRoute.ReasoningEffort"/> are applied as request defaults on a clone of the caller's
+/// <see cref="ChatOptions"/>. Explicit caller values take precedence.
+/// </para>
+/// <para>
 /// Because each route is bound to its own <see cref="IChatClient"/>, a routing pipeline forms a tree: a route's
 /// client may have its own middleware, or may itself be another <see cref="RoutingChatClient"/>.
 /// </para>
@@ -61,9 +66,9 @@ public abstract class RoutingChatClient : IChatClient
     private readonly ReadOnlyCollection<ChatRoute> _routeList;
 
     /// <summary>Initializes a new instance of the <see cref="RoutingChatClient"/> class.</summary>
-    /// <param name="routes">The routes to dispatch between. At least one is required, each bound to an <see cref="IChatClient"/>.</param>
+    /// <param name="routes">The routes to dispatch between. At least one is required.</param>
     /// <exception cref="ArgumentNullException"><paramref name="routes"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException"><paramref name="routes"/> is empty, contains a duplicate name, or contains a route with no bound client.</exception>
+    /// <exception cref="ArgumentException"><paramref name="routes"/> is empty or contains a duplicate name.</exception>
     protected RoutingChatClient(IReadOnlyList<ChatRoute> routes)
     {
         _routes = ValidateRoutes(routes);
@@ -125,7 +130,7 @@ public abstract class RoutingChatClient : IChatClient
 
             try
             {
-                return await route.Client!.GetResponseAsync(messages, options, cancellationToken);
+                return await route.Client.GetResponseAsync(messages, ApplyRouteDefaults(route, options), cancellationToken);
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
@@ -160,7 +165,7 @@ public abstract class RoutingChatClient : IChatClient
             attempted.Add(route);
 
             IAsyncEnumerator<ChatResponseUpdate> enumerator =
-                route.Client!.GetStreamingResponseAsync(messages, options, cancellationToken).GetAsyncEnumerator(cancellationToken);
+                route.Client.GetStreamingResponseAsync(messages, ApplyRouteDefaults(route, options), cancellationToken).GetAsyncEnumerator(cancellationToken);
 
             bool hasFirst;
             try
@@ -230,7 +235,7 @@ public abstract class RoutingChatClient : IChatClient
             HashSet<IChatClient> disposedClients = [];
             foreach (ChatRoute route in _routes)
             {
-                IChatClient client = route.Client!;
+                IChatClient client = route.Client;
                 if (disposedClients.Add(client))
                 {
                     client.Dispose();
@@ -252,11 +257,6 @@ public abstract class RoutingChatClient : IChatClient
         for (int i = 0; i < routes.Count; i++)
         {
             result[i] = Throw.IfNull(routes[i]);
-            if (result[i].Client is null)
-            {
-                Throw.ArgumentException(nameof(routes), $"The route '{result[i].Name}' must be bound to an IChatClient.");
-            }
-
             for (int j = 0; j < i; j++)
             {
                 if (StringComparer.OrdinalIgnoreCase.Equals(result[j].Name, result[i].Name))
@@ -267,5 +267,28 @@ public abstract class RoutingChatClient : IChatClient
         }
 
         return result;
+    }
+
+    private static ChatOptions? ApplyRouteDefaults(ChatRoute route, ChatOptions? options)
+    {
+        bool needsModelId = route.ModelId is not null && options?.ModelId is null;
+        bool needsEffort = route.ReasoningEffort is not null && options?.Reasoning?.Effort is null;
+        if (!needsModelId && !needsEffort)
+        {
+            return options;
+        }
+
+        ChatOptions configured = options?.Clone() ?? new ChatOptions();
+        if (needsModelId)
+        {
+            configured.ModelId = route.ModelId;
+        }
+
+        if (needsEffort)
+        {
+            (configured.Reasoning ??= new ReasoningOptions()).Effort = route.ReasoningEffort;
+        }
+
+        return configured;
     }
 }

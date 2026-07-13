@@ -192,6 +192,34 @@
       ]
     },
     {
+      "Type": "sealed class Microsoft.Extensions.AI.ChatRoute",
+      "Stage": "Experimental",
+      "Methods": [
+        {
+          "Member": "Microsoft.Extensions.AI.ChatRoute.ChatRoute(string name, Microsoft.Extensions.AI.IChatClient client, string? modelId = null, Microsoft.Extensions.AI.ReasoningEffort? reasoningEffort = null);",
+          "Stage": "Experimental"
+        }
+      ],
+      "Properties": [
+        {
+          "Member": "Microsoft.Extensions.AI.IChatClient Microsoft.Extensions.AI.ChatRoute.Client { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "string? Microsoft.Extensions.AI.ChatRoute.ModelId { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "string Microsoft.Extensions.AI.ChatRoute.Name { get; }",
+          "Stage": "Experimental"
+        },
+        {
+          "Member": "Microsoft.Extensions.AI.ReasoningEffort? Microsoft.Extensions.AI.ChatRoute.ReasoningEffort { get; }",
+          "Stage": "Experimental"
+        }
+      ]
+    },
+    {
       "Type": "sealed class Microsoft.Extensions.AI.ConfigureOptionsChatClient : Microsoft.Extensions.AI.DelegatingChatClient",
       "Stage": "Stable",
       "Methods": [

@@ -146,11 +146,16 @@ public class RoutingPolicySamplesTests
     {
         using var text = Ok("text");
         using var tools = Ok("tools");
+        var capabilities = new Dictionary<string, ModelCapabilities>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["text"] = ModelCapabilities.None,
+            ["tools"] = ModelCapabilities.ToolCalling,
+        };
         using var client = new CapabilityGatingRouter(
         [
-            CapRoute("text", text, ModelCapabilities.None),
-            CapRoute("tools", tools, ModelCapabilities.ToolCalling),
-        ]);
+            new ChatRoute("text", text),
+            new ChatRoute("tools", tools),
+        ], capabilities);
 
         var options = new ChatOptions { Tools = [AIFunctionFactory.Create(() => "ok", "tool")] };
         ChatResponse response = await client.GetResponseAsync([User("call a tool")], options);
@@ -164,11 +169,16 @@ public class RoutingPolicySamplesTests
     {
         using var text = Ok("text");
         using var vision = Ok("vision");
+        var capabilities = new Dictionary<string, ModelCapabilities>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["text"] = ModelCapabilities.None,
+            ["vision"] = ModelCapabilities.Vision,
+        };
         using var client = new CapabilityGatingRouter(
         [
-            CapRoute("text", text, ModelCapabilities.None),
-            CapRoute("vision", vision, ModelCapabilities.Vision),
-        ]);
+            new ChatRoute("text", text),
+            new ChatRoute("vision", vision),
+        ], capabilities);
 
         var image = new ChatMessage(ChatRole.User, [new DataContent(new byte[] { 1, 2, 3 }, "image/png")]);
         ChatResponse response = await client.GetResponseAsync([image]);
@@ -182,12 +192,18 @@ public class RoutingPolicySamplesTests
         using var failing = Fails();
         using var text = Ok("text");
         using var toolsB = Ok("tools-b");
+        var capabilities = new Dictionary<string, ModelCapabilities>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["tools-a"] = ModelCapabilities.ToolCalling,
+            ["text"] = ModelCapabilities.None,
+            ["tools-b"] = ModelCapabilities.ToolCalling,
+        };
         using var client = new CapabilityGatingRouter(
         [
-            CapRoute("tools-a", failing, ModelCapabilities.ToolCalling),
-            CapRoute("text", text, ModelCapabilities.None),
-            CapRoute("tools-b", toolsB, ModelCapabilities.ToolCalling),
-        ]);
+            new ChatRoute("tools-a", failing),
+            new ChatRoute("text", text),
+            new ChatRoute("tools-b", toolsB),
+        ], capabilities);
 
         var options = new ChatOptions { Tools = [AIFunctionFactory.Create(() => "ok", "tool")] };
         ChatResponse response = await client.GetResponseAsync([User("call a tool")], options);
@@ -200,7 +216,9 @@ public class RoutingPolicySamplesTests
     public async Task Capability_WhenNoRouteCanServe_Throws()
     {
         using var ok = Ok("text");
-        using var client = new CapabilityGatingRouter([CapRoute("text", ok, ModelCapabilities.None)]);
+        using var client = new CapabilityGatingRouter(
+            [new ChatRoute("text", ok)],
+            new Dictionary<string, ModelCapabilities> { ["text"] = ModelCapabilities.None });
 
         // A tool request with no tool-capable route: the policy returns null on the first call and the base throws
         // rather than silently sending the request to an incapable route.
@@ -208,9 +226,6 @@ public class RoutingPolicySamplesTests
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => client.GetResponseAsync([User("call a tool")], options));
     }
-
-    private static ChatRoute CapRoute(string name, IChatClient client, ModelCapabilities capabilities) =>
-        new(name, additionalProperties: new AdditionalPropertiesDictionary { [CapabilityGatingRouter.CapabilitiesKey] = capabilities }, client: client);
 
     // ------------------------------------------------------------------------
     // CooldownRoutingClient — put a rate-limited route on a self-expiring cooldown.
@@ -386,12 +401,18 @@ public class RoutingPolicySamplesTests
         using var premium = Ok("premium");
         using var cheap = Ok("cheap");
         using var mid = Ok("mid");
+        var economics = new Dictionary<string, RouteEconomics>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["premium"] = new(20m),
+            ["cheap"] = new(1m),
+            ["mid"] = new(5m),
+        };
         using var client = new CheapestRouter(
         [
-            new ChatRoute("premium", inputTokenCostPerMillion: 20m, client: premium),
-            new ChatRoute("cheap", inputTokenCostPerMillion: 1m, client: cheap),
-            new ChatRoute("mid", inputTokenCostPerMillion: 5m, client: mid),
-        ]);
+            new ChatRoute("premium", premium),
+            new ChatRoute("cheap", cheap),
+            new ChatRoute("mid", mid),
+        ], economics);
 
         ChatResponse response = await client.GetResponseAsync([User("hello")]);
         Assert.Equal("cheap", SelectedRoute(response));
@@ -402,11 +423,16 @@ public class RoutingPolicySamplesTests
     {
         using var cheapSmall = Ok("cheap-small");
         using var midLarge = Ok("mid-large");
+        var economics = new Dictionary<string, RouteEconomics>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["cheap-small"] = new(1m, 5),
+            ["mid-large"] = new(5m, 100_000),
+        };
         using var client = new CheapestRouter(
         [
-            new ChatRoute("cheap-small", inputTokenCostPerMillion: 1m, maxInputTokens: 5, client: cheapSmall),
-            new ChatRoute("mid-large", inputTokenCostPerMillion: 5m, maxInputTokens: 100_000, client: midLarge),
-        ]);
+            new ChatRoute("cheap-small", cheapSmall),
+            new ChatRoute("mid-large", midLarge),
+        ], economics);
 
         // A long prompt (~50 estimated tokens) does not fit the cheapest route's 5-token window, so the next cheapest
         // route that does fit is chosen.
@@ -419,11 +445,16 @@ public class RoutingPolicySamplesTests
     {
         using var failing = Fails();
         using var ok = Ok("mid");
+        var economics = new Dictionary<string, RouteEconomics>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["cheap"] = new(1m),
+            ["mid"] = new(5m),
+        };
         using var client = new CheapestRouter(
         [
-            new ChatRoute("cheap", inputTokenCostPerMillion: 1m, client: failing),
-            new ChatRoute("mid", inputTokenCostPerMillion: 5m, client: ok),
-        ]);
+            new ChatRoute("cheap", failing),
+            new ChatRoute("mid", ok),
+        ], economics);
 
         ChatResponse response = await client.GetResponseAsync([User("hello")]);
         Assert.Equal("mid", SelectedRoute(response));
@@ -434,11 +465,16 @@ public class RoutingPolicySamplesTests
     {
         using var failing = StreamThrows();
         using var working = StreamsOk("mid");
+        var economics = new Dictionary<string, RouteEconomics>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["cheap"] = new(1m),
+            ["mid"] = new(5m),
+        };
         using var client = new CheapestRouter(
         [
-            new ChatRoute("cheap", inputTokenCostPerMillion: 1m, client: failing),
-            new ChatRoute("mid", inputTokenCostPerMillion: 5m, client: working),
-        ]);
+            new ChatRoute("cheap", failing),
+            new ChatRoute("mid", working),
+        ], economics);
 
         ChatResponseUpdate? first = null;
         await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync([User("hello")]))
@@ -734,11 +770,14 @@ public class RoutingPolicySamplesTests
     // docs/samples/routing/CapabilityGatingClient.cs
     private sealed class CapabilityGatingRouter : RoutingChatClient
     {
-        public const string CapabilitiesKey = "capabilities";
+        private readonly IReadOnlyDictionary<string, ModelCapabilities> _capabilities;
 
-        public CapabilityGatingRouter(IReadOnlyList<ChatRoute> routes)
+        public CapabilityGatingRouter(
+            IReadOnlyList<ChatRoute> routes,
+            IReadOnlyDictionary<string, ModelCapabilities> capabilities)
             : base(routes)
         {
+            _capabilities = capabilities;
         }
 
         protected override ValueTask<ChatRoute?> SelectRouteAsync(
@@ -750,7 +789,7 @@ public class RoutingPolicySamplesTests
             CancellationToken cancellationToken)
         {
             ModelCapabilities required = RequiredCapabilities(messages, options);
-            return new(routes.Except(attempted).FirstOrDefault(r => Supports(r, required)));
+            return new(routes.Except(attempted).FirstOrDefault(r => Supports(r.Name, required)));
         }
 
         public static ModelCapabilities RequiredCapabilities(IEnumerable<ChatMessage> messages, ChatOptions? options)
@@ -798,13 +837,11 @@ public class RoutingPolicySamplesTests
             return false;
         }
 
-        private static bool Supports(ChatRoute route, ModelCapabilities required)
+        private bool Supports(string routeName, ModelCapabilities required)
         {
-            ModelCapabilities available =
-                route.AdditionalProperties?.TryGetValue(CapabilitiesKey, out ModelCapabilities caps) == true
-                    ? caps
-                    : ModelCapabilities.None;
-
+            ModelCapabilities available = _capabilities.TryGetValue(routeName, out ModelCapabilities capabilities)
+                ? capabilities
+                : ModelCapabilities.None;
             return (available & required) == required;
         }
     }
@@ -985,14 +1022,20 @@ public class RoutingPolicySamplesTests
         }
     }
 
+    private readonly record struct RouteEconomics(decimal InputTokenCostPerMillion, int? MaxInputTokens = null);
+
     // docs/samples/routing/CheapestRouteClient.cs
     private sealed class CheapestRouter : RoutingChatClient
     {
         private const int CharactersPerToken = 4;
+        private readonly IReadOnlyDictionary<string, RouteEconomics> _economics;
 
-        public CheapestRouter(IReadOnlyList<ChatRoute> routes)
+        public CheapestRouter(
+            IReadOnlyList<ChatRoute> routes,
+            IReadOnlyDictionary<string, RouteEconomics> economics)
             : base(routes)
         {
+            _economics = economics;
         }
 
         protected override ValueTask<ChatRoute?> SelectRouteAsync(
@@ -1007,8 +1050,12 @@ public class RoutingPolicySamplesTests
 
             ChatRoute? next = routes
                 .Except(attempted)
-                .Where(r => r.MaxInputTokens is null || r.MaxInputTokens >= approxTokens)
-                .OrderBy(r => r.InputTokenCostPerMillion ?? decimal.MaxValue)
+                .Where(r => !_economics.TryGetValue(r.Name, out RouteEconomics data) ||
+                    data.MaxInputTokens is null ||
+                    data.MaxInputTokens >= approxTokens)
+                .OrderBy(r => _economics.TryGetValue(r.Name, out RouteEconomics data)
+                    ? data.InputTokenCostPerMillion
+                    : decimal.MaxValue)
                 .FirstOrDefault();
 
             return new(next);
