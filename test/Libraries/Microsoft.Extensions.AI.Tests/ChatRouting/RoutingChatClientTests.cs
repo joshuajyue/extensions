@@ -33,6 +33,18 @@ public class RoutingChatClientTests
     }
 
     [Fact]
+    public void ChatRoute_ClonesAdditionalProperties()
+    {
+        using var inner = new TestChatClient();
+        var properties = new AdditionalPropertiesDictionary { ["cost"] = 1m };
+
+        var route = new ChatRoute("m1", inner, additionalProperties: properties);
+        properties["cost"] = 2m;
+
+        Assert.Equal(1m, route.AdditionalProperties!["cost"]);
+    }
+
+    [Fact]
     public void Constructor_RejectsDuplicateNamesCaseInsensitively()
     {
         using var inner = new TestChatClient();

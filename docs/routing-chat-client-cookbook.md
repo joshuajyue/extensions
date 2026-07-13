@@ -48,15 +48,16 @@ public ChatRoute(
     string name,
     IChatClient client,
     string? modelId = null,
-    ReasoningEffort? reasoningEffort = null);
+    ReasoningEffort? reasoningEffort = null,
+    AdditionalPropertiesDictionary? additionalProperties = null);
 ```
 
-Its only properties are `Name`, `Client`, `ModelId`, and `ReasoningEffort`. `Name` is the policy key,
+Its properties are `Name`, `Client`, `ModelId`, `ReasoningEffort`, and `AdditionalProperties`. `Name` is the policy key,
 `Client` is required and non-null, and `ModelId` and `ReasoningEffort` are request defaults. When a route
 contributes a missing default, `RoutingChatClient` clones the caller's `ChatOptions` (creating options when
 needed) before filling `ChatOptions.ModelId` or `ChatOptions.Reasoning.Effort`. Caller values win and the
-original options are not mutated. Cost, context, capability, provider, provenance, and similar metadata
-belong to typed application or policy configuration keyed by route name.
+original options are not mutated. `AdditionalProperties` carries application-owned policy metadata that RCC
+never interprets; reusable selectors can store strongly typed cost, capability, provider, or catalog values there.
 
 One client can therefore serve multiple logical routes. The selected route supplies different defaults to
 the same client:
@@ -179,26 +180,34 @@ serve it. This policy reads what each request actually needs and returns the fir
 is configured to support all of it — so it doubles as a correctness filter and a capability-aware fallback
 chain.
 
-Capabilities are policy-owned typed configuration keyed by route name. If no capable route remains, the
-base class throws or rethrows rather than silently downgrading to an incapable model.
+Capabilities are policy-owned typed values stored in each route's `AdditionalProperties`. If no capable route
+remains, the base class throws or rethrows rather than silently downgrading to an incapable model.
 
 Full sample: [CapabilityGatingClient.cs](./samples/routing/CapabilityGatingClient.cs).
 
 ```csharp
 IChatClient router = new CapabilityGatingClient(
-    routes:
-    [
-        new ChatRoute("mini", openaiMini, modelId: "gpt-4o-mini"),
-        new ChatRoute("omni", openai,     modelId: "gpt-4o"),
-    ],
-    capabilitiesByRouteName: new Dictionary<string, ModelCapabilities>
-    {
-        ["mini"] = ModelCapabilities.ToolCalling,
-        ["omni"] =
-            ModelCapabilities.ToolCalling |
-            ModelCapabilities.Vision |
-            ModelCapabilities.StructuredOutput,
-    });
+[
+    new ChatRoute(
+        "mini",
+        openaiMini,
+        modelId: "gpt-4o-mini",
+        additionalProperties: new()
+        {
+            [CapabilityGatingClient.CapabilitiesKey] = ModelCapabilities.ToolCalling,
+        }),
+    new ChatRoute(
+        "omni",
+        openai,
+        modelId: "gpt-4o",
+        additionalProperties: new()
+        {
+            [CapabilityGatingClient.CapabilitiesKey] =
+                ModelCapabilities.ToolCalling |
+                ModelCapabilities.Vision |
+                ModelCapabilities.StructuredOutput,
+        }),
+]);
 
 // A plain chat can be served by either route → "mini".
 var text = await router.GetResponseAsync("summarize this thread");
@@ -343,28 +352,41 @@ if (lastException is ClientResultException { Status: 401 or 403 })
 
 ## Cheapest that fits
 
-Keep cost and context-window data in typed policy configuration keyed by route name, then return the
-cheapest route whose configured window admits the prompt. Because selection and fallback are the same
-method, this forms a cost-ordered fallback chain automatically.
+Keep cost and context-window data as a strongly typed value in each route's `AdditionalProperties`, then
+return the cheapest route whose configured window admits the prompt. Because selection and fallback are
+the same method, this forms a cost-ordered fallback chain automatically.
 
 Full sample: [CheapestRouteClient.cs](./samples/routing/CheapestRouteClient.cs).
 
 ```csharp
 IChatClient router = new CheapestRouteClient(
-    routes:
-    [
-        new ChatRoute("mini", openai, modelId: "gpt-4o-mini"),
-        new ChatRoute("large", openai, modelId: "gpt-4o"),
-    ],
-    configurationByRouteName: new Dictionary<string, RouteCostConfiguration>
-    {
-        ["mini"] = new(ContextWindowTokens: 128_000, InputCostPerMillionTokens: 0.15m),
-        ["large"] = new(ContextWindowTokens: 128_000, InputCostPerMillionTokens: 2.50m),
-    });
+[
+    new ChatRoute(
+        "mini",
+        openai,
+        modelId: "gpt-4o-mini",
+        additionalProperties: new()
+        {
+            [CheapestRouteClient.ConfigurationKey] =
+                new RouteCostConfiguration(128_000, 0.15m),
+        }),
+    new ChatRoute(
+        "large",
+        openai,
+        modelId: "gpt-4o",
+        additionalProperties: new()
+        {
+            [CheapestRouteClient.ConfigurationKey] =
+                new RouteCostConfiguration(128_000, 2.50m),
+        }),
+]);
 
 ChatRoute? next = routes
     .Except(attempted)
-    .Select(route => (Route: route, Configuration: _configurationByRouteName[route.Name]))
+    .Select(route => (
+        Route: route,
+        Configuration: route.AdditionalProperties![
+            CheapestRouteClient.ConfigurationKey] as RouteCostConfiguration))
     .Where(candidate =>
         candidate.Configuration.ContextWindowTokens is null ||
         candidate.Configuration.ContextWindowTokens >= approxTokens)

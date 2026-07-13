@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 
 namespace Microsoft.Extensions.AI.Samples.Routing;
 
-/// <summary>Application-owned cost and context configuration for a route name.</summary>
+/// <summary>Application-owned cost and context metadata stored on a route.</summary>
 public sealed record RouteCostConfiguration(
     int? ContextWindowTokens,
     decimal? InputCostPerMillionTokens);
@@ -21,27 +21,22 @@ public sealed record RouteCostConfiguration(
 /// Returns the cheapest route that fits the request, and — because selection and fallback are the same
 /// method — forms a cost-ordered fallback chain automatically. On every call it filters to routes whose
 /// context window admits the prompt, orders the remaining unattempted routes by input price, and returns the
-/// cheapest. Cost and context are application policy, so the caller supplies typed configuration keyed by
-/// <see cref="ChatRoute.Name"/> rather than storing it on the route.
+/// cheapest. Cost and context are application policy stored as a strongly typed value in
+/// <see cref="ChatRoute.AdditionalProperties"/>.
 /// </summary>
 public sealed class CheapestRouteClient : RoutingChatClient
 {
-    private const int CharactersPerToken = 4;
-    private readonly IReadOnlyDictionary<string, RouteCostConfiguration> _configurationByRouteName;
+    /// <summary>The route metadata key under which callers store <see cref="RouteCostConfiguration"/>.</summary>
+    public const string ConfigurationKey = "cost";
 
-    public CheapestRouteClient(
-        IReadOnlyList<ChatRoute> routes,
-        IReadOnlyDictionary<string, RouteCostConfiguration> configurationByRouteName)
+    private const int CharactersPerToken = 4;
+
+    public CheapestRouteClient(IReadOnlyList<ChatRoute> routes)
         : base(routes)
     {
-        _configurationByRouteName = configurationByRouteName ??
-            throw new ArgumentNullException(nameof(configurationByRouteName));
-
-        if (routes.Any(route => !_configurationByRouteName.ContainsKey(route.Name)))
+        if (routes.Any(route => !TryGetConfiguration(route, out _)))
         {
-            throw new ArgumentException(
-                "Every route must have cost and context configuration.",
-                nameof(configurationByRouteName));
+            throw new ArgumentException("Every route must carry cost and context metadata.", nameof(routes));
         }
     }
 
@@ -57,7 +52,11 @@ public sealed class CheapestRouteClient : RoutingChatClient
 
         ChatRoute? next = routes
             .Except(attempted)
-            .Select(route => (Route: route, Configuration: _configurationByRouteName[route.Name]))
+            .Select(route =>
+            {
+                _ = TryGetConfiguration(route, out RouteCostConfiguration? configuration);
+                return (Route: route, Configuration: configuration!);
+            })
             .Where(candidate =>
                 candidate.Configuration.ContextWindowTokens is null ||
                 candidate.Configuration.ContextWindowTokens >= approxTokens)
@@ -68,4 +67,7 @@ public sealed class CheapestRouteClient : RoutingChatClient
 
         return new(next);
     }
+
+    private static bool TryGetConfiguration(ChatRoute route, out RouteCostConfiguration? configuration) =>
+        route.AdditionalProperties?.TryGetValue(ConfigurationKey, out configuration) == true;
 }

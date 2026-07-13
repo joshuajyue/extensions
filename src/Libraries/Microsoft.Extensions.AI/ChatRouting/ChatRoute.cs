@@ -11,9 +11,9 @@ namespace Microsoft.Extensions.AI;
 /// <remarks>
 /// A route is a named invocation target: a required <see cref="IChatClient"/> plus optional model and reasoning
 /// defaults. Multiple routes may bind the same client with different defaults, allowing one provider client to
-/// expose several logical model or reasoning profiles. Other policy data — such as cost, capability, context
-/// window, provider, latency, or provenance — is application-owned and can be stored alongside routes by the
-/// <see cref="RoutingChatClient"/> subclass.
+/// expose several logical model or reasoning profiles. Application-owned policy metadata — such as cost,
+/// capability, context window, provider, latency, or provenance — can be carried in
+/// <see cref="AdditionalProperties"/> without being interpreted by <see cref="RoutingChatClient"/>.
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AIRoutingChat, UrlFormat = DiagnosticIds.UrlFormat)]
 public sealed class ChatRoute
@@ -23,16 +23,19 @@ public sealed class ChatRoute
     /// <param name="client">The chat client to invoke when this route is selected.</param>
     /// <param name="modelId">Optional provider-specific model identifier.</param>
     /// <param name="reasoningEffort">Optional reasoning effort to request when this route is selected.</param>
+    /// <param name="additionalProperties">Optional application-owned policy metadata associated with the route.</param>
     public ChatRoute(
         string name,
         IChatClient client,
         string? modelId = null,
-        ReasoningEffort? reasoningEffort = null)
+        ReasoningEffort? reasoningEffort = null,
+        AdditionalPropertiesDictionary? additionalProperties = null)
     {
         Name = Throw.IfNullOrWhitespace(name);
         Client = Throw.IfNull(client);
         ModelId = modelId;
         ReasoningEffort = reasoningEffort;
+        AdditionalProperties = additionalProperties?.Clone();
     }
 
     /// <summary>Gets the stable name identifying this route.</summary>
@@ -54,4 +57,8 @@ public sealed class ChatRoute
     /// An explicit value supplied by the caller takes precedence.
     /// </remarks>
     public ReasoningEffort? ReasoningEffort { get; }
+
+    /// <summary>Gets application-owned policy metadata associated with the route.</summary>
+    /// <remarks><see cref="RoutingChatClient"/> does not interpret these values.</remarks>
+    public AdditionalPropertiesDictionary? AdditionalProperties { get; }
 }

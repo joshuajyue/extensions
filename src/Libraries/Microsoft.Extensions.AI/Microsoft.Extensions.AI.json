@@ -196,11 +196,15 @@
       "Stage": "Experimental",
       "Methods": [
         {
-          "Member": "Microsoft.Extensions.AI.ChatRoute.ChatRoute(string name, Microsoft.Extensions.AI.IChatClient client, string? modelId = null, Microsoft.Extensions.AI.ReasoningEffort? reasoningEffort = null);",
+          "Member": "Microsoft.Extensions.AI.ChatRoute.ChatRoute(string name, Microsoft.Extensions.AI.IChatClient client, string? modelId = null, Microsoft.Extensions.AI.ReasoningEffort? reasoningEffort = null, Microsoft.Extensions.AI.AdditionalPropertiesDictionary? additionalProperties = null);",
           "Stage": "Experimental"
         }
       ],
       "Properties": [
+        {
+          "Member": "Microsoft.Extensions.AI.AdditionalPropertiesDictionary? Microsoft.Extensions.AI.ChatRoute.AdditionalProperties { get; }",
+          "Stage": "Experimental"
+        },
         {
           "Member": "Microsoft.Extensions.AI.IChatClient Microsoft.Extensions.AI.ChatRoute.Client { get; }",
           "Stage": "Experimental"

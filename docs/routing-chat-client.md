@@ -131,10 +131,11 @@ public ChatRoute(
     string name,
     IChatClient client,
     string? modelId = null,
-    ReasoningEffort? reasoningEffort = null);
+    ReasoningEffort? reasoningEffort = null,
+    AdditionalPropertiesDictionary? additionalProperties = null);
 ```
 
-It exposes only four get-only properties:
+It exposes five get-only properties:
 
 | Member | Type | Description |
 |---|---|---|
@@ -142,6 +143,7 @@ It exposes only four get-only properties:
 | `Client` | `IChatClient` | Required and non-null. The client invoked when the route is selected. |
 | `ModelId` | `string?` | A model-id request default applied at dispatch. |
 | `ReasoningEffort` | `ReasoningEffort?` | A reasoning-effort request default applied at dispatch. |
+| `AdditionalProperties` | `AdditionalPropertiesDictionary?` | Application-owned policy metadata; RCC never interprets it. |
 
 When a selected route contributes a missing default, `RoutingChatClient` clones the caller's `ChatOptions`
 (or creates options when none were supplied) before applying it. Route `ModelId` fills
@@ -168,11 +170,11 @@ ChatRoute[] routes =
 If the policy selects `fast`, the shared client receives `gpt-4o-mini`; if it selects `deep` (including as
 a fallback), the same client receives `o3` and high reasoning effort.
 
-### Keep catalog and policy metadata in application types
+### Keep catalog and policy metadata application-owned
 
 Cost, capability, context-window, latency, provenance, provider, and other catalog data belong to the
-application or routing policy, not to `ChatRoute`. Keep that data in a typed application record keyed by
-route name, then create the runtime route when clients are composed:
+application or routing policy. Store strongly typed values in `AdditionalProperties` so reusable selectors
+can inspect them without RCC assigning framework semantics:
 
 ```csharp
 public sealed record ModelCatalogEntry(
@@ -186,8 +188,15 @@ public sealed record ModelCatalogEntry(
     Uri MetadataSource,
     DateTimeOffset MetadataRefreshedAt)
 {
+    public const string MetadataKey = "catalog";
+
     public ChatRoute Bind(IChatClient client) =>
-        new(RouteName, client, ModelId, DefaultReasoningEffort);
+        new(
+            RouteName,
+            client,
+            ModelId,
+            DefaultReasoningEffort,
+            new AdditionalPropertiesDictionary { [MetadataKey] = this });
 }
 
 ModelCatalogEntry[] catalog =
@@ -205,9 +214,10 @@ ChatRoute[] runtimeRoutes = catalog
     .Select(entry => entry.Bind(sharedOpenAIClient))
     .ToArray();
 
-// Policies can retain the typed catalog, keyed by ChatRoute.Name.
-IReadOnlyDictionary<string, ModelCatalogEntry> policyMetadataByRouteName =
-    catalog.ToDictionary(entry => entry.RouteName, StringComparer.OrdinalIgnoreCase);
+// A selector can recover the typed metadata directly from the route.
+ModelCatalogEntry metadata =
+    runtimeRoutes[0].AdditionalProperties![ModelCatalogEntry.MetadataKey] as ModelCatalogEntry
+    ?? throw new InvalidOperationException();
 ```
 
 Mapping external catalogs (LiteLLM, GitHub Models, provider feeds) into application-owned records is left
@@ -242,7 +252,7 @@ Return the route to try next, or `null` to stop. The policy may retry an attempt
 outside `routes`; it owns those decisions and must eventually return `null` if attempts keep failing.
 `null` on the first call throws; `null` after a failure rethrows `lastException`.
 
-A minimal cheapest-first policy reads typed, application-owned cost configuration keyed by route name:
+A minimal cheapest-first policy reads typed, application-owned cost metadata from each route:
 
 ```csharp
 public sealed record RouteCostConfiguration(
@@ -251,13 +261,10 @@ public sealed record RouteCostConfiguration(
 
 public sealed class CheapestRouteClient : RoutingChatClient
 {
-    private readonly IReadOnlyDictionary<string, RouteCostConfiguration> _configurationByRouteName;
+    public const string ConfigurationKey = "cost";
 
-    public CheapestRouteClient(
-        IReadOnlyList<ChatRoute> routes,
-        IReadOnlyDictionary<string, RouteCostConfiguration> configurationByRouteName)
-        : base(routes) =>
-        _configurationByRouteName = configurationByRouteName;
+    public CheapestRouteClient(IReadOnlyList<ChatRoute> routes)
+        : base(routes) { }
 
     protected override ValueTask<ChatRoute?> SelectRouteAsync(
         IEnumerable<ChatMessage> messages,
@@ -270,9 +277,16 @@ public sealed class CheapestRouteClient : RoutingChatClient
         // Cheapest route not yet attempted; null when the ranked chain is exhausted.
         ChatRoute? next = routes
             .Except(attempted)
-            .OrderBy(route =>
-                _configurationByRouteName[route.Name].InputCostPerMillionTokens ??
-                decimal.MaxValue)
+            .Select(route => (
+                Route: route,
+                Cost: route.AdditionalProperties?.TryGetValue(
+                    ConfigurationKey,
+                    out RouteCostConfiguration? cost) == true
+                        ? cost
+                        : null))
+            .OrderBy(candidate =>
+                candidate.Cost?.InputCostPerMillionTokens ?? decimal.MaxValue)
+            .Select(candidate => candidate.Route)
             .FirstOrDefault();
 
         return new ValueTask<ChatRoute?>(next);

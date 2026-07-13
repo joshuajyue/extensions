@@ -33,22 +33,18 @@ public enum ModelCapabilities
 /// A hard capability gate: it inspects each request for the features it actually needs — tools, image
 /// input, structured output — and returns the first unattempted route configured for all of them. Unlike
 /// the cost or difficulty policies, capability is a <em>correctness</em> filter, not a preference: a request
-/// carrying a tool must never reach a route that cannot call tools. Capabilities are application policy,
-/// so the caller supplies typed configuration keyed by <see cref="ChatRoute.Name"/> rather than storing it
-/// on the route. Because selection and fallback are the same method, a failure simply advances to the next
-/// capable route.
+/// carrying a tool must never reach a route that cannot call tools. Capabilities are application policy stored
+/// as a strongly typed value in <see cref="ChatRoute.AdditionalProperties"/>. Because selection and fallback are
+/// the same method, a failure simply advances to the next capable route.
 /// </summary>
 public sealed class CapabilityGatingClient : RoutingChatClient
 {
-    private readonly IReadOnlyDictionary<string, ModelCapabilities> _capabilitiesByRouteName;
+    /// <summary>The route metadata key under which callers store <see cref="ModelCapabilities"/>.</summary>
+    public const string CapabilitiesKey = "capabilities";
 
-    public CapabilityGatingClient(
-        IReadOnlyList<ChatRoute> routes,
-        IReadOnlyDictionary<string, ModelCapabilities> capabilitiesByRouteName)
+    public CapabilityGatingClient(IReadOnlyList<ChatRoute> routes)
         : base(routes)
     {
-        _capabilitiesByRouteName = capabilitiesByRouteName ??
-            throw new ArgumentNullException(nameof(capabilitiesByRouteName));
     }
 
     protected override ValueTask<ChatRoute?> SelectRouteAsync(
@@ -63,7 +59,7 @@ public sealed class CapabilityGatingClient : RoutingChatClient
 
         ChatRoute? next = routes
             .Except(attempted)
-            .FirstOrDefault(route => Supports(route.Name, required));
+            .FirstOrDefault(route => Supports(route, required));
 
         // next is null when no capable route remains: the base class throws on the first call, or rethrows
         // the last exception on a fallback call. That is the correct outcome — silently sending a request to
@@ -117,12 +113,12 @@ public sealed class CapabilityGatingClient : RoutingChatClient
         return false;
     }
 
-    // A route satisfies the request when its configured capabilities include every required capability
-    // (superset). A route with no configuration is treated as text-only.
-    private bool Supports(string routeName, ModelCapabilities required)
+    // A route satisfies the request when its metadata includes every required capability (superset).
+    // A route with no capability metadata is treated as text-only.
+    private static bool Supports(ChatRoute route, ModelCapabilities required)
     {
         ModelCapabilities available =
-            _capabilitiesByRouteName.TryGetValue(routeName, out ModelCapabilities capabilities)
+            route.AdditionalProperties?.TryGetValue(CapabilitiesKey, out ModelCapabilities capabilities) == true
                 ? capabilities
                 : ModelCapabilities.None;
 
