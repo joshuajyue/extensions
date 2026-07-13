@@ -96,10 +96,9 @@ public class ChatRoute
 
     /// <summary>Gets the optional reasoning effort to request when this route is selected.</summary>
     /// <remarks>
-    /// This is advisory request-shaping metadata, a sibling of <see cref="ModelId"/>: a routing front door applies it
-    /// to <see cref="ChatOptions.Reasoning"/> when this route is chosen and the caller did not already pin an effort.
-    /// It lets a single model be offered as several routes that differ only by effort (for example a low/medium/high
-    /// trio over the same reasoning model). Providers or models that do not support reasoning effort ignore it.
+    /// This is advisory metadata, a sibling of <see cref="ModelId"/>, that a routing policy can use when selecting
+    /// between routes. It lets a single model be represented by routes that differ only by effort (for example a
+    /// low/medium/high trio over the same reasoning model).
     /// </remarks>
     public ReasoningEffort? ReasoningEffort { get; }
 

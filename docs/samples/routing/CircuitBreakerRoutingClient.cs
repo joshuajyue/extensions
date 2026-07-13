@@ -17,7 +17,7 @@ namespace Microsoft.Extensions.AI.Samples.Routing;
 /// Ordered failover with a per-route circuit breaker: after a route fails a threshold number of times in a row
 /// its circuit opens and the route is skipped for a reset window, then allowed a single half-open trial. The
 /// breaker is time-based so it needs no success signal — once the reset window elapses the route is eligible
-/// again, and its failure streak is cleared when it is next chosen.
+/// again, and its failure streak is cleared when it is next chosen for that half-open trial.
 /// </summary>
 /// <remarks>
 /// The routing seam only observes failures (it is re-invoked with <c>lastException</c> after a route throws), so
@@ -37,7 +37,7 @@ public sealed class CircuitBreakerRoutingClient : RoutingChatClient
     {
     }
 
-    protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+    protected override ValueTask<ChatRoute?> SelectRouteAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options,
         IReadOnlyList<ChatRoute> routes,
@@ -67,8 +67,10 @@ public sealed class CircuitBreakerRoutingClient : RoutingChatClient
             .Except(attempted)
             .FirstOrDefault(r => !IsOpen(r.Name, now));
 
-        // Clear the chosen route's streak: a half-open trial starts fresh so one stale failure cannot re-trip it.
-        if (next is not null)
+        // Clear the chosen route's streak only when it is a half-open trial (its open window has elapsed), so one
+        // stale failure cannot immediately re-trip it. A route still accumulating failures below the threshold keeps
+        // its streak, so consecutive failures add up and actually open the circuit.
+        if (next is not null && IsHalfOpen(next.Name, now))
         {
             _ = _breakers.TryRemove(next.Name, out _);
         }
@@ -80,6 +82,12 @@ public sealed class CircuitBreakerRoutingClient : RoutingChatClient
         _breakers.TryGetValue(routeName, out Breaker breaker) &&
         breaker.Failures >= FailureThreshold &&
         breaker.OpenUntil > now;
+
+    // A route whose circuit tripped but whose open window has since elapsed: eligible for a single half-open trial.
+    private bool IsHalfOpen(string routeName, DateTimeOffset now) =>
+        _breakers.TryGetValue(routeName, out Breaker breaker) &&
+        breaker.Failures >= FailureThreshold &&
+        breaker.OpenUntil <= now;
 
     private readonly record struct Breaker(int Failures, DateTimeOffset OpenUntil);
 }

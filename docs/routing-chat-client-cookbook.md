@@ -18,9 +18,9 @@ Everything is in the `Microsoft.Extensions.AI` namespace.
 
 ## The one seam
 
-Routing has a single extension point: `RoutingChatClient.SelectNextRouteAsync`. You **derive from
+Routing has a single extension point: `RoutingChatClient.SelectRouteAsync`. You **derive from
 `RoutingChatClient`** and override that one method; the base class owns everything else — dispatch,
-fallback, telemetry, response stamping, and disposal. The base calls your method in a loop and asks the
+fallback, and disposal. The base calls your method in a loop and asks the
 same question each time — *given the request and what has been attempted (and why the last attempt
 failed), which route next, or `null` to stop?*
 
@@ -30,17 +30,14 @@ failed), which route next, or `null` to stop?*
 
 That is the whole model: *selection, filtering, and failover are the same method.* A difficulty
 classifier, an embedding router, a cooldown gate, and ordered failover are all just different bodies for
-`SelectNextRouteAsync`.
+`SelectRouteAsync`.
 
-Rules the base class enforces:
+Dispatch semantics:
 
-- The returned route must be one of the registered instances, **matched by reference** — a reconstructed
-  `ChatRoute` with identical metadata makes the router throw. Resolve by name against `routes`:
-  ```csharp
-  ChatRoute pick = routes.First(r =>
-      string.Equals(r.Name, wanted, StringComparison.OrdinalIgnoreCase));
-  ```
-- A route already in `attempted` stops the loop (so routing always terminates).
+- The policy may return any usable route and may retry a route already in `attempted`. It is responsible for
+  eventually returning `null` if attempts keep failing.
+- The router owns and disposes only the routes registered with its constructor. The policy owns the lifetime of
+  any other route it returns.
 - `null` on the first call throws; `null` after a failure rethrows the last exception.
 - Cancellation never triggers fallback.
 - When streaming, fallback stops once the first token is on the wire.
@@ -371,26 +368,10 @@ IChatClient root = new RegionRouterClient(   // your RoutingChatClient subclass
 ]);
 ```
 
-Telemetry composes cleanly: each router opens its own `routing.route` span, and the winning path is
-stamped on the response under `RoutingChatClient.SelectedPathKey` (for example, `"eu/gpt-4o-mini"`).
+The leaf client's response flows back unchanged through every router.
 
-### Reading the routing decision off the response
-
-The chosen route is stamped on the **response** (never mutated into the request):
-
-```csharp
-var response = await router.GetResponseAsync(messages);
-
-response.AdditionalProperties!.TryGetValue(RoutingChatClient.SelectedRouteNameKey, out object? route);
-response.AdditionalProperties!.TryGetValue(RoutingChatClient.SelectedModelIdKey, out object? modelId);
-response.AdditionalProperties!.TryGetValue(RoutingChatClient.SelectedPathKey, out object? path);
-// route   → the router-local alias that answered
-// modelId → the concrete billed model (use this for cost/usage attribution)
-// path    → the full winning path through any nested routers
-```
-
-For the full trace-event schema (`routing.decision`, `routing.attempt`), see
-[routing-chat-client.md](./routing-chat-client.md#trace-events).
+For standard OpenTelemetry spans, wrap the router to trace the overall request and wrap each route client
+to trace individual attempts. See [routing-chat-client.md](./routing-chat-client.md#opentelemetry).
 
 ---
 
@@ -406,7 +387,7 @@ For the full trace-event schema (`routing.decision`, `routing.attempt`), see
 | **Trip** a route after repeated failures | [CircuitBreakerRoutingClient.cs](./samples/routing/CircuitBreakerRoutingClient.cs) |
 | Try routes **in order until one works** | [OrderedFailoverClient.cs](./samples/routing/OrderedFailoverClient.cs) |
 | **Cheapest that fits** | [CheapestRouteClient.cs](./samples/routing/CheapestRouteClient.cs) |
-| **Pin** a request to a specific model/route | `ChatOptions.ModelId` (read in your `SelectNextRouteAsync`) |
+| **Pin** a request to a specific model/route | `ChatOptions.ModelId` (read in your `SelectRouteAsync`) |
 | **Prune a provider** on an auth error | interpret `lastException`, don't return that provider's routes |
 | Route across **different providers/clients** | routes bound via `client:` / `WithClient` |
 | **Nested** region/tenant → model routing | a route whose `Client` is another `RoutingChatClient` |

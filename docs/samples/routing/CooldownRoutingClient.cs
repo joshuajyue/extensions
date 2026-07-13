@@ -37,7 +37,7 @@ public sealed class CooldownRoutingClient : RoutingChatClient
     {
     }
 
-    protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+    protected override ValueTask<ChatRoute?> SelectRouteAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options,
         IReadOnlyList<ChatRoute> routes,

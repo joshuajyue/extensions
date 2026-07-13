@@ -54,7 +54,7 @@ public sealed class SemanticRoutingClient : RoutingChatClient
         _scoreThreshold = scoreThreshold;
     }
 
-    protected override async ValueTask<ChatRoute?> SelectNextRouteAsync(
+    protected override async ValueTask<ChatRoute?> SelectRouteAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options,
         IReadOnlyList<ChatRoute> routes,

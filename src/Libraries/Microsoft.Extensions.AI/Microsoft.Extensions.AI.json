@@ -1542,45 +1542,8 @@
           "Stage": "Experimental"
         },
         {
-          "Member": "abstract System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoute?> Microsoft.Extensions.AI.RoutingChatClient.SelectNextRouteAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> attempted, System.Exception? lastException, System.Threading.CancellationToken cancellationToken);",
+          "Member": "abstract System.Threading.Tasks.ValueTask<Microsoft.Extensions.AI.ChatRoute?> Microsoft.Extensions.AI.RoutingChatClient.SelectRouteAsync(System.Collections.Generic.IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> routes, System.Collections.Generic.IReadOnlyList<Microsoft.Extensions.AI.ChatRoute> attempted, System.Exception? lastException, System.Threading.CancellationToken cancellationToken);",
           "Stage": "Experimental"
-        }
-      ],
-      "Fields": [
-        {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.ActivitySourceName",
-          "Stage": "Experimental",
-          "Value": "Microsoft.Extensions.AI.Routing"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.AttemptEventName",
-          "Stage": "Experimental",
-          "Value": "routing.attempt"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.DecisionEventName",
-          "Stage": "Experimental",
-          "Value": "routing.decision"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedModelIdKey",
-          "Stage": "Experimental",
-          "Value": "routing.selected_model_id"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedPathKey",
-          "Stage": "Experimental",
-          "Value": "routing.selected_path"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedProviderNameKey",
-          "Stage": "Experimental",
-          "Value": "routing.selected_provider"
-        },
-        {
-          "Member": "const string Microsoft.Extensions.AI.RoutingChatClient.SelectedRouteNameKey",
-          "Stage": "Experimental",
-          "Value": "routing.selected_route"
         }
       ],
       "Properties": [

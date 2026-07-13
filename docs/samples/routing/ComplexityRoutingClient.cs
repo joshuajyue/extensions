@@ -82,7 +82,7 @@ public sealed class ComplexityRoutingClient : RoutingChatClient
         _defaultRoute = defaultRoute;
     }
 
-    protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+    protected override ValueTask<ChatRoute?> SelectRouteAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options,
         IReadOnlyList<ChatRoute> routes,

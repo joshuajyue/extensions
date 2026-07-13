@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -59,17 +58,6 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public void GetService_ReturnsRoutingChatClientMetadata()
-    {
-        using var inner = new TestChatClient();
-        using var client = new OrderedFailoverRouter([new ChatRoute("m1", client: inner)]);
-
-        var metadata = client.GetService(typeof(ChatClientMetadata)) as ChatClientMetadata;
-        Assert.NotNull(metadata);
-        Assert.Equal("routing", metadata!.ProviderName);
-    }
-
-    [Fact]
     public void GetService_ReturnsSelf_AndNullForUnknownOrKeyed()
     {
         using var inner = new TestChatClient();
@@ -82,11 +70,12 @@ public class RoutingChatClientTests
 
         // A keyed lookup or an unrelated type resolves to nothing.
         Assert.Null(client.GetService(typeof(OrderedFailoverRouter), serviceKey: "k"));
+        Assert.Null(client.GetService(typeof(ChatClientMetadata)));
         Assert.Null(client.GetService(typeof(string)));
     }
 
     [Fact]
-    public async Task Failover_ForwardsModelId_StampsResponse_AndDoesNotLeakIntoRequest()
+    public async Task Dispatch_PassesMessagesOptionsAndResponseThroughUnchanged()
     {
         var expectedResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
         var messages = new List<ChatMessage> { new(ChatRole.User, "hello") };
@@ -110,20 +99,8 @@ public class RoutingChatClientTests
 
         Assert.Same(expectedResponse, response);
 
-        // The provider model id is forwarded (the caller did not pin one), but on a clone.
-        Assert.NotNull(forwarded);
-        Assert.NotSame(options, forwarded);
-        Assert.Equal("gpt-4o-mini", forwarded!.ModelId);
-
-        // Routing internals are never written into the forwarded request.
-        Assert.True(forwarded.AdditionalProperties is null || forwarded.AdditionalProperties.Count == 0);
-
-        // The decision is stamped on the response.
-        Assert.NotNull(response.AdditionalProperties);
-        Assert.Equal("m1", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
-        Assert.Equal("gpt-4o-mini", response.AdditionalProperties[RoutingChatClient.SelectedModelIdKey]);
-        Assert.Equal("openai", response.AdditionalProperties[RoutingChatClient.SelectedProviderNameKey]);
-        Assert.Equal("m1", response.AdditionalProperties[RoutingChatClient.SelectedPathKey]);
+        Assert.Same(options, forwarded);
+        Assert.Null(response.AdditionalProperties);
     }
 
     [Fact]
@@ -144,7 +121,6 @@ public class RoutingChatClientTests
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")], new ChatOptions { ModelId = "gpt-b" });
 
         Assert.Same(r2, response);
-        Assert.Equal("m2", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
     }
 
     [Fact]
@@ -165,7 +141,6 @@ public class RoutingChatClientTests
         // Matches the second route by Name (case-insensitive), not the default first route.
         ChatResponse byName = await client.GetResponseAsync([new(ChatRole.User, "hi")], new ChatOptions { ModelId = "gpt-4o" });
         Assert.Same(r2, byName);
-        Assert.Equal("GPT-4o", byName.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
 
         // Matches the second route by ModelId (case-insensitive) as well.
         ChatResponse byId = await client.GetResponseAsync([new(ChatRole.User, "hi")], new ChatOptions { ModelId = "OPENAI/gpt-4o" });
@@ -190,11 +165,10 @@ public class RoutingChatClientTests
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")], new ChatOptions { ModelId = "does-not-exist" });
 
         Assert.Same(r1, response);
-        Assert.Equal("m1", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
     }
 
     [Fact]
-    public async Task Failover_WalksRoutesOnFailure_AndStampsTheRouteThatSucceeded()
+    public async Task Failover_WalksRoutesOnFailure()
     {
         var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "recovered"));
         using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("boom") };
@@ -209,7 +183,6 @@ public class RoutingChatClientTests
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
 
         Assert.Same(good, response);
-        Assert.Equal("backup", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
     }
 
     [Fact]
@@ -249,11 +222,10 @@ public class RoutingChatClientTests
 
         ChatResponseUpdate only = Assert.Single(updates);
         Assert.Equal("ok", only.Text);
-        Assert.Equal("backup", only.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
     }
 
     [Fact]
-    public async Task Failover_ForwardsReasoningEffort_WhenCallerPinsNeither()
+    public async Task Dispatch_DoesNotInterpretRouteMetadata()
     {
         ChatOptions? forwarded = null;
         var options = new ChatOptions();
@@ -267,15 +239,13 @@ public class RoutingChatClientTests
 
         _ = await client.GetResponseAsync([new(ChatRole.User, "hi")], options);
 
-        Assert.NotNull(forwarded);
-        Assert.NotSame(options, forwarded);
-        Assert.Equal("gpt-x", forwarded!.ModelId);
-        Assert.Equal(ReasoningEffort.High, forwarded.Reasoning!.Effort);
+        Assert.Same(options, forwarded);
+        Assert.Null(forwarded!.ModelId);
         Assert.Null(options.Reasoning);
     }
 
     [Fact]
-    public async Task Streaming_StampsOnlyTheFirstUpdate()
+    public async Task Streaming_PassesUpdatesThroughUnchanged()
     {
         using var inner = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("a", "b") };
 
@@ -288,10 +258,8 @@ public class RoutingChatClientTests
         }
 
         Assert.Equal(2, updates.Count);
-        Assert.Equal("m1", updates[0].AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
-        Assert.True(
-            updates[1].AdditionalProperties is null ||
-            !updates[1].AdditionalProperties!.ContainsKey(RoutingChatClient.SelectedRouteNameKey));
+        Assert.Equal(["a", "b"], updates.Select(u => u.Text));
+        Assert.All(updates, u => Assert.Null(u.AdditionalProperties));
     }
 
     [Fact]
@@ -310,7 +278,6 @@ public class RoutingChatClientTests
         ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
 
         Assert.Same(r2, response);
-        Assert.Equal("m2", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
     }
 
     [Fact]
@@ -335,7 +302,6 @@ public class RoutingChatClientTests
         ChatResponse response = await client.GetResponseAsync([imageMessage]);
 
         Assert.Same(visionResponse, response);
-        Assert.Equal("vision", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
     }
 
     [Fact]
@@ -371,7 +337,6 @@ public class RoutingChatClientTests
 
         // openai-b was pruned because it shares openai-a's provider on the auth error; anthropic answered.
         Assert.Same(good, response);
-        Assert.Equal("anthropic", response.AdditionalProperties![RoutingChatClient.SelectedRouteNameKey]);
     }
 
     [Fact]
@@ -406,39 +371,60 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task Policy_ReturningUnregisteredRoute_Throws()
+    public async Task Policy_CanDispatchRouteOutsideRegisteredSet()
     {
-        using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse()) };
-        var stranger = new ChatRoute("stranger", client: inner);
+        int registeredCalls = 0;
+        int selectedCalls = 0;
+        using var registered = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, _, _) =>
+            {
+                registeredCalls++;
+                return Task.FromResult(new ChatResponse());
+            },
+        };
+        using var selected = new TestChatClient
+        {
+            GetResponseAsyncCallback = (_, _, _) =>
+            {
+                selectedCalls++;
+                return Task.FromResult(new ChatResponse());
+            },
+        };
+        var stranger = new ChatRoute("stranger", client: selected);
 
         using var client = new DelegatingTestRouter(
-            [new ChatRoute("m1", client: inner)],
+            [new ChatRoute("m1", client: registered)],
             (_, _, _, _, _) => stranger);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => client.GetResponseAsync([new(ChatRole.User, "hi")]));
+        _ = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
+
+        Assert.Equal(0, registeredCalls);
+        Assert.Equal(1, selectedCalls);
     }
 
     [Fact]
-    public async Task Policy_ReturningAlreadyAttemptedRoute_TerminatesAndRethrows()
+    public async Task Policy_CanRetryAlreadyAttemptedRoute()
     {
-        var attempts = new List<string>();
-        using var failing = new TestChatClient
+        int attempts = 0;
+        using var inner = new TestChatClient
         {
-            GetResponseAsyncCallback = (_, _, _) => { attempts.Add("m1"); throw new InvalidOperationException("boom"); },
+            GetResponseAsyncCallback = (_, _, _) =>
+            {
+                attempts++;
+                return attempts == 1
+                    ? throw new InvalidOperationException("transient")
+                    : Task.FromResult(new ChatResponse());
+            },
         };
 
-        // A buggy policy that keeps returning the same (already-attempted) route must not loop forever: the base
-        // collapses an already-attempted route to termination, so the last exception is rethrown after one attempt.
         using var client = new DelegatingTestRouter(
-            [new ChatRoute("m1", client: failing)],
+            [new ChatRoute("m1", client: inner)],
             (_, _, routes, _, _) => routes[0]);
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => client.GetResponseAsync([new(ChatRole.User, "hi")]));
+        _ = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
 
-        Assert.Equal("boom", ex.Message);
-        Assert.Equal(["m1"], attempts);
+        Assert.Equal(2, attempts);
     }
 
     [Fact]
@@ -503,136 +489,6 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task AttemptEvents_RecordFallbackThenSuccess()
-    {
-        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
-        using var failing = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("boom") };
-        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
-
-        using var client = new OrderedFailoverRouter(
-        [
-            new ChatRoute("primary", modelId: "p", providerName: "prov", client: failing),
-            new ChatRoute("backup", modelId: "b", client: working),
-        ]);
-
-        using var capture = new AttemptEventCapture();
-        using (capture.StartTurn())
-        {
-            _ = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
-        }
-
-        Assert.Equal(2, capture.Events.Count);
-        Assert.Equal("fallback", GetTag(capture.Events[0], "routing.attempt.outcome"));
-        Assert.Equal("primary", GetTag(capture.Events[0], "routing.attempt.route"));
-        Assert.Equal(1, GetTag(capture.Events[0], "routing.attempt.ordinal"));
-        Assert.Equal(typeof(InvalidOperationException).FullName, GetTag(capture.Events[0], "routing.attempt.error_type"));
-        Assert.Equal("success", GetTag(capture.Events[1], "routing.attempt.outcome"));
-        Assert.Equal("backup", GetTag(capture.Events[1], "routing.attempt.route"));
-        Assert.Equal(2, GetTag(capture.Events[1], "routing.attempt.ordinal"));
-    }
-
-    [Fact]
-    public async Task AttemptEvents_RecordErrorWhenChainExhausted()
-    {
-        using var failing1 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("a") };
-        using var failing2 = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => throw new InvalidOperationException("b") };
-
-        using var client = new OrderedFailoverRouter(
-        [
-            new ChatRoute("m1", client: failing1),
-            new ChatRoute("m2", client: failing2),
-        ]);
-
-        using var capture = new AttemptEventCapture();
-        using (capture.StartTurn())
-        {
-            await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetResponseAsync([new(ChatRole.User, "hi")]));
-        }
-
-        Assert.Equal(2, capture.Events.Count);
-        Assert.Equal("fallback", GetTag(capture.Events[0], "routing.attempt.outcome"));
-        Assert.Equal("error", GetTag(capture.Events[1], "routing.attempt.outcome"));
-    }
-
-    [Fact]
-    public async Task AttemptEvents_SingleSuccess_RecordsOneEvent()
-    {
-        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
-        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
-
-        using var client = new OrderedFailoverRouter([new ChatRoute("only", client: working)]);
-
-        using var capture = new AttemptEventCapture();
-        using (capture.StartTurn())
-        {
-            _ = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
-        }
-
-        ActivityEvent evt = Assert.Single(capture.Events);
-        Assert.Equal("success", GetTag(evt, "routing.attempt.outcome"));
-        Assert.Equal(1, GetTag(evt, "routing.attempt.ordinal"));
-    }
-
-    [Fact]
-    public async Task AttemptEvents_Streaming_RecordsFallbackThenFirstTokenSuccess()
-    {
-        using var failing = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => ThrowingStream() };
-        using var working = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("ok") };
-
-        using var client = new OrderedFailoverRouter(
-        [
-            new ChatRoute("primary", client: failing),
-            new ChatRoute("backup", client: working),
-        ]);
-
-        using var capture = new AttemptEventCapture();
-        using (capture.StartTurn())
-        {
-            var updates = new List<ChatResponseUpdate>();
-            await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync([new(ChatRole.User, "hi")]))
-            {
-                updates.Add(update);
-            }
-
-            Assert.NotEmpty(updates);
-        }
-
-        Assert.Equal(2, capture.Events.Count);
-        Assert.Equal("fallback", GetTag(capture.Events[0], "routing.attempt.outcome"));
-        Assert.Equal("success", GetTag(capture.Events[1], "routing.attempt.outcome"));
-    }
-
-    [Fact]
-    public async Task AttemptEvents_NotEmitted_WhenNoListenerRecording()
-    {
-        var good = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
-        using var working = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(good) };
-
-        using var client = new OrderedFailoverRouter([new ChatRoute("only", client: working)]);
-
-        // No ActivityListener subscribed: the router does no telemetry work and the call still succeeds.
-        ChatResponse response = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
-        Assert.Same(good, response);
-    }
-
-    [Fact]
-    public async Task DecisionEvent_RecordsSelectedRoute()
-    {
-        using var inner = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))) };
-
-        using var client = new OrderedFailoverRouter([new ChatRoute("m", modelId: "prov/m", client: inner)]);
-
-        using var capture = new AttemptEventCapture();
-        using (capture.StartTurn())
-        {
-            _ = await client.GetResponseAsync([new(ChatRole.User, "hi")]);
-        }
-
-        ActivityEvent decision = Assert.Single(capture.DecisionEvents);
-        Assert.Equal("m", GetTag(decision, "routing.selected_route"));
-    }
-
-    [Fact]
     public void Dispose_DisposesEachClientExactlyOnce()
     {
 #pragma warning disable CA2000 // Dispose objects before losing scope
@@ -654,10 +510,10 @@ public class RoutingChatClientTests
     }
 
     [Fact]
-    public async Task Messages_NonListEnumerable_IsMaterializedOnce_AndSharedByEveryStage()
+    public async Task Messages_NonListEnumerable_IsPassedThroughUnchanged()
     {
-        // A lazily-generated message sequence must be enumerated exactly once and the same snapshot handed to both
-        // the policy and the dispatched client, so a generator with side effects is never re-run per stage.
+        // The router does not enumerate or snapshot messages; the policy and dispatched client receive the caller's
+        // original sequence and own any enumeration semantics.
         int enumerations = 0;
         IEnumerable<ChatMessage> Lazy()
         {
@@ -677,19 +533,21 @@ public class RoutingChatClientTests
             [new ChatRoute("m1", client: inner)],
             (messages, _, routes, _, _) => { policySaw = messages; return routes[0]; });
 
-        _ = await client.GetResponseAsync(Lazy());
+        IEnumerable<ChatMessage> messages = Lazy();
+        _ = await client.GetResponseAsync(messages);
 
-        Assert.Equal(1, enumerations);
-        Assert.Same(policySaw, dispatchSaw);
+        Assert.Equal(0, enumerations);
+        Assert.Same(messages, policySaw);
+        Assert.Same(messages, dispatchSaw);
     }
 
     [Fact]
-    public async Task Nesting_LeafWinsIdentity_AndPathAccumulates()
+    public async Task Nesting_ReturnsLeafResponseUnchanged()
     {
-        // A router-of-routers: the outer router's single route's client is itself a RoutingChatClient whose leaf is
-        // the concrete provider model. The response must identify the LEAF that produced the tokens — not the outer
-        // "Complexity" wrapper, whose ModelId/ProviderName are null — while the path records the full route.
-        var leafResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
+        var leafResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))
+        {
+            AdditionalProperties = new AdditionalPropertiesDictionary { ["leaf"] = true },
+        };
         using var leafClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(leafResponse) };
 
         using var inner = new OrderedFailoverRouter(
@@ -700,15 +558,13 @@ public class RoutingChatClientTests
         ChatResponse response = await outer.GetResponseAsync([new(ChatRole.User, "hi")]);
 
         Assert.Same(leafResponse, response);
-        AdditionalPropertiesDictionary props = response.AdditionalProperties!;
-        Assert.Equal("gpt-4o-mini", props[RoutingChatClient.SelectedRouteNameKey]);
-        Assert.Equal("openai/gpt-4o-mini", props[RoutingChatClient.SelectedModelIdKey]);
-        Assert.Equal("openai", props[RoutingChatClient.SelectedProviderNameKey]);
-        Assert.Equal("Complexity/gpt-4o-mini", props[RoutingChatClient.SelectedPathKey]);
+        AdditionalPropertiesDictionary props = Assert.IsType<AdditionalPropertiesDictionary>(response.AdditionalProperties);
+        Assert.Single(props);
+        Assert.True(Assert.IsType<bool>(props["leaf"]));
     }
 
     [Fact]
-    public async Task Nesting_Streaming_LeafWinsIdentity_AndPathAccumulates()
+    public async Task Nesting_Streaming_ReturnsLeafUpdatesUnchanged()
     {
         using var leafClient = new TestChatClient { GetStreamingResponseAsyncCallback = (_, _, _) => YieldUpdates("ok") };
         using var inner = new OrderedFailoverRouter(
@@ -723,33 +579,8 @@ public class RoutingChatClientTests
         }
 
         Assert.NotNull(first);
-        AdditionalPropertiesDictionary props = first!.AdditionalProperties!;
-        Assert.Equal("gpt-4o-mini", props[RoutingChatClient.SelectedRouteNameKey]);
-        Assert.Equal("openai/gpt-4o-mini", props[RoutingChatClient.SelectedModelIdKey]);
-        Assert.Equal("Complexity/gpt-4o-mini", props[RoutingChatClient.SelectedPathKey]);
-    }
-
-    [Fact]
-    public async Task Nesting_WhenRoutingSourceSubscribed_ProducesSpanTreeWithPerRouterEvents()
-    {
-        var leafResponse = new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
-        using var leafClient = new TestChatClient { GetResponseAsyncCallback = (_, _, _) => Task.FromResult(leafResponse) };
-        using var inner = new OrderedFailoverRouter(
-            [new ChatRoute("gpt-4o-mini", providerName: "openai", modelId: "openai/gpt-4o-mini", client: leafClient)]);
-        using var outer = new OrderedFailoverRouter(
-            [new ChatRoute("Complexity", client: inner)]);
-
-        using var capture = new RoutingSpanCapture();
-        _ = await outer.GetResponseAsync([new(ChatRole.User, "hi")]);
-
-        Assert.Equal(2, capture.Spans.Count);
-
-        Activity innerSpan = Assert.Single(capture.Spans, s => SpanSelectedModel(s) == "gpt-4o-mini");
-        Activity outerSpan = Assert.Single(capture.Spans, s => SpanSelectedModel(s) == "Complexity");
-
-        Assert.Equal(outerSpan.SpanId, innerSpan.ParentSpanId);
-        Assert.Equal(1, SpanAttemptOrdinal(innerSpan));
-        Assert.Equal(1, SpanAttemptOrdinal(outerSpan));
+        Assert.Equal("ok", first!.Text);
+        Assert.Null(first.AdditionalProperties);
     }
 
     private static async IAsyncEnumerable<ChatResponseUpdate> YieldUpdates(params string[] texts)
@@ -772,72 +603,6 @@ public class RoutingChatClientTests
         throw new InvalidOperationException("boom");
     }
 
-    private static object? GetTag(ActivityEvent evt, string key) =>
-        evt.Tags.FirstOrDefault(t => t.Key == key).Value;
-
-    // Registers an ActivitySource + listener, starts a recording "turn" activity, and collects the
-    // routing.attempt events the router adds to it. Mirrors how a real OpenTelemetry consumer would observe them.
-    private sealed class AttemptEventCapture : IDisposable
-    {
-        private readonly ActivitySource _source = new("RoutingChatClientTests-" + Guid.NewGuid().ToString("N"));
-        private readonly ActivityListener _listener;
-        private Activity? _turn;
-
-        public AttemptEventCapture()
-        {
-            _listener = new ActivityListener
-            {
-                ShouldListenTo = s => s == _source,
-                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
-            };
-            ActivitySource.AddActivityListener(_listener);
-        }
-
-        public IReadOnlyList<ActivityEvent> Events =>
-            _turn?.Events.Where(e => e.Name == RoutingChatClient.AttemptEventName).ToList() ?? [];
-
-        public IReadOnlyList<ActivityEvent> DecisionEvents =>
-            _turn?.Events.Where(e => e.Name == RoutingChatClient.DecisionEventName).ToList() ?? [];
-
-        public IDisposable StartTurn() => _turn = _source.StartActivity("turn")!;
-
-        public void Dispose()
-        {
-            _turn?.Dispose();
-            _listener.Dispose();
-            _source.Dispose();
-        }
-    }
-
-    // Subscribes to the routing ActivitySource so every RoutingChatClient opens its own span, and collects those
-    // spans when they stop (their events are final at that point). Lets a test observe routing as a span tree and
-    // assert each router's events are scoped to its own span rather than sharing one ambient activity.
-    private sealed class RoutingSpanCapture : IDisposable
-    {
-        private readonly ActivityListener _listener;
-
-        public RoutingSpanCapture()
-        {
-            _listener = new ActivityListener
-            {
-                ShouldListenTo = s => s.Name == RoutingChatClient.ActivitySourceName,
-                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
-                ActivityStopped = Spans.Add,
-            };
-            ActivitySource.AddActivityListener(_listener);
-        }
-
-        public List<Activity> Spans { get; } = [];
-
-        public void Dispose() => _listener.Dispose();
-    }
-
-    private static string? SpanSelectedModel(Activity span) =>
-        (string?)GetTag(Assert.Single(span.Events, e => e.Name == RoutingChatClient.DecisionEventName), "routing.selected_route");
-
-    private static int SpanAttemptOrdinal(Activity span) =>
-        (int)GetTag(Assert.Single(span.Events, e => e.Name == RoutingChatClient.AttemptEventName), "routing.attempt.ordinal")!;
-
     // A RoutingChatClient whose selection policy is supplied as a delegate, so a test can express any policy —
     // initial selection, candidate filtering, and failure handling — inline without a bespoke subclass per case.
     private sealed class DelegatingTestRouter : RoutingChatClient
@@ -852,7 +617,7 @@ public class RoutingChatClientTests
             _select = select;
         }
 
-        protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+        protected override ValueTask<ChatRoute?> SelectRouteAsync(
             IEnumerable<ChatMessage> messages,
             ChatOptions? options,
             IReadOnlyList<ChatRoute> routes,
@@ -865,8 +630,8 @@ public class RoutingChatClientTests
     // A RoutingChatClient that implements ordered-failover selection: honor an explicit ModelId, otherwise the
     // first registered route, then each remaining route in registration order on failure. This is the canonical
     // ~15-line sample policy (the same one the docs show for "try routes in order until one works"); the tests
-    // use it as a realistic subclass to exercise the base dispatch mechanism — dispatch, forwarding, fallback,
-    // telemetry, stamping, nesting, and disposal.
+    // use it as a realistic subclass to exercise the base dispatch mechanism — dispatch, fallback, nesting, and
+    // disposal.
     private sealed class OrderedFailoverRouter : RoutingChatClient
     {
         public OrderedFailoverRouter(IReadOnlyList<ChatRoute> routes)
@@ -874,7 +639,7 @@ public class RoutingChatClientTests
         {
         }
 
-        protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+        protected override ValueTask<ChatRoute?> SelectRouteAsync(
             IEnumerable<ChatMessage> messages,
             ChatOptions? options,
             IReadOnlyList<ChatRoute> routes,

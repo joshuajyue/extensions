@@ -2,7 +2,7 @@
 
 Illustrative `RoutingChatClient` subclasses referenced by
 [../routing-chat-client-cookbook.md](../routing-chat-client-cookbook.md). Each file is a complete policy —
-one override of `SelectNextRouteAsync` — that you can copy into your own project and adapt.
+one override of `SelectRouteAsync` — that you can copy into your own project and adapt.
 
 These files are **documentation samples**, not a shipped library: they are not part of the build, and the
 routing types they use are experimental (`[Experimental("MEAI001")]`), so each file opens with

@@ -33,7 +33,7 @@ namespace Microsoft.Extensions.AI.Samples.Routing;
 /// </remarks>
 public sealed class StickyRoutingClient : RoutingChatClient
 {
-    /// <summary>Chooses the next route the same way <see cref="RoutingChatClient.SelectNextRouteAsync"/> does.</summary>
+    /// <summary>Chooses the next route the same way <see cref="RoutingChatClient.SelectRouteAsync"/> does.</summary>
     public delegate ValueTask<ChatRoute?> InnerSelector(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options,
@@ -55,7 +55,7 @@ public sealed class StickyRoutingClient : RoutingChatClient
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
     }
 
-    protected override ValueTask<ChatRoute?> SelectNextRouteAsync(
+    protected override ValueTask<ChatRoute?> SelectRouteAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options,
         IReadOnlyList<ChatRoute> routes,
